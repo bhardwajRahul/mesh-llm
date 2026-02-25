@@ -3,6 +3,7 @@
 llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
 mesh_dir := "mesh-llm"
+ui_dir := mesh_dir / "ui"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
@@ -19,7 +20,11 @@ build:
     echo "Build complete: {{build_dir}}/bin/"
     if [ -d "{{mesh_dir}}" ]; then
         echo "Building mesh-llm..."
-        cd "{{mesh_dir}}" && cargo build --release
+        if [ -d "{{ui_dir}}" ]; then
+            echo "Building mesh-llm UI..."
+            (cd "{{ui_dir}}" && npm ci && npm run build)
+        fi
+        (cd "{{mesh_dir}}" && cargo build --release)
         echo "Mesh binary: {{mesh_dir}}/target/release/mesh-llm"
     fi
 
@@ -118,6 +123,13 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     tar czf {{output}} -C "$DIR" mesh-bundle/
     rm -rf "$DIR"
     echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"
+
+# Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
+ui-dev api="http://127.0.0.1:3131" port="5173":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{ui_dir}}"
+    MESH_UI_API_ORIGIN="{{api}}" npm run dev -- --host 127.0.0.1 --port {{port}}
 
 # Start a lite client — no GPU, no model, just a local HTTP proxy to the mesh host.
 # Only needs the mesh-llm binary (no llama.cpp binaries or model).

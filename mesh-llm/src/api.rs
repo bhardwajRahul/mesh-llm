@@ -5,19 +5,22 @@
 //!   GET  /api/events    — SSE stream of status updates
 //!   GET  /api/discover  — browse Nostr-published meshes
 //!   POST /api/chat      — proxy to inference API
-//!   GET  /              — console HTML dashboard
+//!   GET  /              — embedded web dashboard
 //!
-//! The console is read-only — shows status, topology, models.
+//! The dashboard is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
 use crate::{download, election, mesh, nostr};
+use include_dir::{include_dir, Dir};
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 
-static CONSOLE_HTML: &str = include_str!("console.html");
+static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
+const MESH_LLM_VERSION: &str = crate::VERSION;
 
 // ── Shared state ──
 
@@ -29,6 +32,7 @@ pub struct MeshApi {
 
 struct ApiInner {
     node: mesh::Node,
+    api_key_token: String,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -38,14 +42,18 @@ struct ApiInner {
     api_port: u16,
     model_size_bytes: u64,
     mesh_name: Option<String>,
+    latest_version: Option<String>,
     nostr_relays: Vec<String>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 #[derive(Serialize)]
 struct StatusPayload {
+    version: String,
+    latest_version: Option<String>,
     node_id: String,
     token: String,
+    api_key_token: String,
     node_status: String,
     is_host: bool,
     is_client: bool,
@@ -59,6 +67,7 @@ struct StatusPayload {
     launch_pi: Option<String>,
     launch_goose: Option<String>,
     mesh_models: Vec<MeshModelPayload>,
+    inflight_requests: u64,
     /// Mesh identity (for matching against discovered meshes)
     mesh_id: Option<String>,
     /// Human-readable mesh name (from Nostr publishing)
@@ -72,8 +81,7 @@ struct PeerPayload {
     models: Vec<String>,
     vram_gb: f64,
     serving: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
+    rtt_ms: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -82,19 +90,15 @@ struct MeshModelPayload {
     status: String,
     node_count: usize,
     size_gb: f64,
-    /// Total requests seen across the mesh (from demand map)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    request_count: Option<u64>,
-    /// Seconds since last request or declaration (None if no demand data)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_active_secs_ago: Option<u64>,
 }
 
 impl MeshApi {
     pub fn new(node: mesh::Node, model_name: String, api_port: u16, model_size_bytes: u64) -> Self {
+        let api_key_token = load_or_create_api_key_token();
         MeshApi {
             inner: Arc::new(Mutex::new(ApiInner {
                 node,
+                api_key_token,
                 is_host: false,
                 is_client: false,
                 llama_ready: false,
@@ -104,13 +108,15 @@ impl MeshApi {
                 api_port,
                 model_size_bytes,
                 mesh_name: None,
-                nostr_relays: nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
+                latest_version: None,
+                nostr_relays: nostr::DEFAULT_RELAYS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 sse_clients: Vec::new(),
             })),
-
         }
     }
-
 
     pub async fn set_draft_name(&self, name: String) {
         self.inner.lock().await.draft_name = Some(name);
@@ -141,84 +147,100 @@ impl MeshApi {
         self.inner.lock().await.llama_port = port;
     }
 
+    pub async fn reset_api_key_token(&self) -> String {
+        let token = generate_api_key_token();
+        if let Err(e) = save_api_key_token(&token) {
+            tracing::warn!("Failed to persist api_key_token: {e}");
+        }
+        {
+            let mut inner = self.inner.lock().await;
+            inner.api_key_token = token.clone();
+        }
+        self.push_status().await;
+        token
+    }
+
     async fn status(&self) -> StatusPayload {
         let inner = self.inner.lock().await;
         let node = &inner.node;
         let node_id = node.id().fmt_short().to_string();
         let token = node.invite_token();
+        let api_key_token = inner.api_key_token.clone();
         let my_vram_gb = node.vram_bytes() as f64 / 1e9;
+        let inflight_requests = node.inflight_requests();
 
         let all_peers = node.peers().await;
-        let peers: Vec<PeerPayload> = all_peers.iter().map(|p| PeerPayload {
-            id: p.id.fmt_short().to_string(),
-            role: match p.role {
-                mesh::NodeRole::Worker => "Worker".into(),
-                mesh::NodeRole::Host { http_port } => format!("Host (:{http_port})"),
-                mesh::NodeRole::Client => "Client".into(),
-            },
-            models: p.models.clone(),
-            vram_gb: p.vram_bytes as f64 / 1e9,
-            serving: p.serving.clone(),
-            version: p.version.clone(),
-        }).collect();
+        let peers: Vec<PeerPayload> = all_peers
+            .iter()
+            .map(|p| PeerPayload {
+                id: p.id.fmt_short().to_string(),
+                role: match p.role {
+                    mesh::NodeRole::Worker => "Worker".into(),
+                    mesh::NodeRole::Host { .. } => "Host".into(),
+                    mesh::NodeRole::Client => "Client".into(),
+                },
+                models: p.models.clone(),
+                vram_gb: p.vram_bytes as f64 / 1e9,
+                serving: p.serving.clone(),
+                rtt_ms: p.rtt_ms,
+            })
+            .collect();
 
         let catalog = node.mesh_catalog().await;
         let served = node.models_being_served().await;
-        let active_demand = node.active_demand().await;
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let my_serving = inner.model_name.clone();
-        let mesh_models: Vec<MeshModelPayload> = catalog.iter().map(|name| {
-            let is_warm = served.contains(name);
-            let node_count = if is_warm {
-                let peer_count = all_peers.iter()
-                    .filter(|p| p.serving.as_deref() == Some(name.as_str()))
-                    .count();
-                let me = if *name == my_serving { 1 } else { 0 };
-                peer_count + me
-            } else {
-                0
-            };
-            // Model size: use local knowledge if it's our model, otherwise catalog
-            let size_gb = if *name == my_serving && inner.model_size_bytes > 0 {
-                inner.model_size_bytes as f64 / 1e9
-            } else {
-                download::parse_size_gb(
-                    download::MODEL_CATALOG.iter()
-                        .find(|m| m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
-                            || m.name == name.as_str())
-                        .map(|m| m.size)
-                        .unwrap_or("0")
-                )
-            };
-            // Demand info from the unified demand map
-            let (request_count, last_active_secs_ago) = match active_demand.get(name) {
-                Some(d) => (
-                    Some(d.request_count),
-                    Some(now_ts.saturating_sub(d.last_active)),
-                ),
-                None => (None, None),
-            };
-            MeshModelPayload {
-                name: name.clone(),
-                status: if is_warm { "warm".into() } else { "cold".into() },
-                node_count,
-                size_gb,
-                request_count,
-                last_active_secs_ago,
-            }
-        }).collect();
+        let mesh_models: Vec<MeshModelPayload> = catalog
+            .iter()
+            .map(|name| {
+                let is_warm = served.contains(name);
+                let node_count = if is_warm {
+                    let peer_count = all_peers
+                        .iter()
+                        .filter(|p| p.serving.as_deref() == Some(name.as_str()))
+                        .count();
+                    let me = if *name == my_serving { 1 } else { 0 };
+                    peer_count + me
+                } else {
+                    0
+                };
+                // Model size: use local knowledge if it's our model, otherwise catalog
+                let size_gb = if *name == my_serving && inner.model_size_bytes > 0 {
+                    inner.model_size_bytes as f64 / 1e9
+                } else {
+                    download::parse_size_gb(
+                        download::MODEL_CATALOG
+                            .iter()
+                            .find(|m| {
+                                m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
+                                    || m.name == name.as_str()
+                            })
+                            .map(|m| m.size)
+                            .unwrap_or("0"),
+                    )
+                };
+                MeshModelPayload {
+                    name: name.clone(),
+                    status: if is_warm {
+                        "warm".into()
+                    } else {
+                        "cold".into()
+                    },
+                    node_count,
+                    size_gb,
+                }
+            })
+            .collect();
 
         let (launch_pi, launch_goose) = if inner.llama_ready {
             let name = &inner.model_name;
             let port = inner.api_port;
             (
                 Some(format!("pi --provider mesh --model {name}")),
-                Some(format!("GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:{port} OPENAI_API_KEY=mesh GOOSE_MODEL={name} goose session")),
+                Some(format!("GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:{port} OPENAI_API_KEY={api_key_token} GOOSE_MODEL={name} goose session")),
             )
-        } else { (None, None) };
+        } else {
+            (None, None)
+        };
 
         let mesh_id = node.mesh_id().await;
 
@@ -227,10 +249,10 @@ impl MeshApi {
             "Client".to_string()
         } else if inner.is_host && inner.llama_ready {
             // Check if any peers are workers in our split (serving same model, role=Worker)
-            let has_split_workers = all_peers.iter().any(|p|
-                matches!(p.role, mesh::NodeRole::Worker) &&
-                p.serving.as_deref() == Some(inner.model_name.as_str())
-            );
+            let has_split_workers = all_peers.iter().any(|p| {
+                matches!(p.role, mesh::NodeRole::Worker)
+                    && p.serving.as_deref() == Some(inner.model_name.as_str())
+            });
             if has_split_workers {
                 "Serving (split)".to_string()
             } else {
@@ -250,8 +272,11 @@ impl MeshApi {
         };
 
         StatusPayload {
+            version: MESH_LLM_VERSION.to_string(),
+            latest_version: inner.latest_version.clone(),
             node_id,
             token,
+            api_key_token,
             node_status,
             is_host: inner.is_host,
             is_client: inner.is_client,
@@ -265,6 +290,7 @@ impl MeshApi {
             launch_pi,
             launch_goose,
             mesh_models,
+            inflight_requests,
             mesh_id,
             mesh_name: inner.mesh_name.clone(),
         }
@@ -283,6 +309,84 @@ impl MeshApi {
     }
 }
 
+fn mesh_config_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("config.json")
+}
+
+fn generate_api_key_token() -> String {
+    format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>(),
+        rand::random::<u64>(),
+        rand::random::<u64>(),
+    )
+}
+
+fn load_or_create_api_key_token() -> String {
+    let path = mesh_config_path();
+    let mut cfg = serde_json::Map::<String, serde_json::Value>::new();
+
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(obj) = value.as_object() {
+                cfg = obj.clone();
+            }
+        }
+    }
+
+    // Rotate API token on each startup and persist it in config.json.
+    let token = generate_api_key_token();
+    cfg.insert(
+        "api_key_token".to_string(),
+        serde_json::Value::String(token.clone()),
+    );
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                "Failed to create config directory {}: {e}",
+                parent.display()
+            );
+            return token;
+        }
+    }
+
+    let body = serde_json::Value::Object(cfg).to_string();
+    if let Err(e) = std::fs::write(&path, body) {
+        tracing::warn!("Failed to write config {}: {e}", path.display());
+    }
+
+    token
+}
+
+fn save_api_key_token(token: &str) -> std::io::Result<()> {
+    let path = mesh_config_path();
+    let mut cfg = serde_json::Map::<String, serde_json::Value>::new();
+
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(obj) = value.as_object() {
+                cfg = obj.clone();
+            }
+        }
+    }
+
+    cfg.insert(
+        "api_key_token".to_string(),
+        serde_json::Value::String(token.to_string()),
+    );
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::Value::Object(cfg).to_string();
+    std::fs::write(path, body)
+}
+
 // ── Server ──
 
 /// Start the mesh management API server.
@@ -296,13 +400,17 @@ pub async fn start(
     let state2 = state.clone();
     tokio::spawn(async move {
         loop {
-            if target_rx.changed().await.is_err() { break; }
+            if target_rx.changed().await.is_err() {
+                break;
+            }
             let target = target_rx.borrow().clone();
             match target {
-                election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
+                election::InferenceTarget::Local(port)
+                | election::InferenceTarget::MoeLocal(port) => {
                     state2.set_llama_port(Some(port)).await;
                 }
-                election::InferenceTarget::Remote(_) | election::InferenceTarget::MoeRemote(_) => {
+                election::InferenceTarget::Remote(_)
+                | election::InferenceTarget::MoeRemote(_) => {
                     let mut inner = state2.inner.lock().await;
                     inner.llama_ready = true;
                     inner.llama_port = None;
@@ -315,13 +423,50 @@ pub async fn start(
         }
     });
 
-    // Periodic status push (picks up peer changes)
+    // Push status when peers join/leave.
+    let mut peer_rx = {
+        let inner = state.inner.lock().await;
+        inner.node.peer_change_rx.clone()
+    };
     let state3 = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if peer_rx.changed().await.is_err() {
+                break;
+            }
             state3.push_status().await;
         }
+    });
+
+    // Push status when in-flight request count changes.
+    let mut inflight_rx = {
+        let inner = state.inner.lock().await;
+        inner.node.inflight_change_rx()
+    };
+    let state4 = state.clone();
+    tokio::spawn(async move {
+        loop {
+            if inflight_rx.changed().await.is_err() {
+                break;
+            }
+            state4.push_status().await;
+        }
+    });
+
+    // One-shot check for newer public release (for UI footer indicator).
+    let state5 = state.clone();
+    tokio::spawn(async move {
+        let Some(latest) = crate::latest_release_version().await else {
+            return;
+        };
+        if !crate::version_newer(&latest, crate::VERSION) {
+            return;
+        }
+        {
+            let mut inner = state5.inner.lock().await;
+            inner.latest_version = Some(latest);
+        }
+        state5.push_status().await;
     });
 
     let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
@@ -335,7 +480,9 @@ pub async fn start(
     tracing::info!("Management API on http://localhost:{port}");
 
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_request(stream, &state).await {
@@ -351,49 +498,43 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
+    let method = req.split_whitespace().next().unwrap_or("GET");
     let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let path_only = path.split('?').next().unwrap_or(path);
 
-    match path {
-        // ── Console HTML ──
-        "/" => {
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                CONSOLE_HTML.len(), CONSOLE_HTML
-            );
-            stream.write_all(resp.as_bytes()).await?;
+    match (method, path_only) {
+        // ── Dashboard UI ──
+        ("GET", "/") => {
+            if !respond_console_index(&mut stream).await? {
+                respond_error(&mut stream, 500, "Dashboard bundle missing").await?;
+            }
+        }
+
+        ("GET", "/dashboard") | ("GET", "/chat") | ("GET", "/dashboard/") | ("GET", "/chat/") => {
+            if !respond_console_index(&mut stream).await? {
+                respond_error(&mut stream, 500, "Dashboard bundle missing").await?;
+            }
+        }
+
+        ("GET", p) if p.starts_with("/chat/") => {
+            if !respond_console_index(&mut stream).await? {
+                respond_error(&mut stream, 500, "Dashboard bundle missing").await?;
+            }
+        }
+
+        // ── Frontend static assets ──
+        ("GET", p) if p.starts_with("/assets/") => {
+            if !respond_console_asset(&mut stream, p).await? {
+                respond_error(&mut stream, 404, "Not found").await?;
+            }
         }
 
         // ── Discover meshes via Nostr ──
-        "/api/discover" => {
+        ("GET", "/api/discover") => {
             let relays = state.inner.lock().await.nostr_relays.clone();
             let filter = nostr::MeshFilter::default();
             match nostr::discover(&relays, &filter).await {
                 Ok(meshes) => {
-                    // Dedup: named meshes grouped by name (keep best — most nodes, freshest).
-                    // Unnamed meshes shown individually.
-                    let meshes = {
-                        let mut by_name: std::collections::HashMap<String, nostr::DiscoveredMesh> = std::collections::HashMap::new();
-                        let mut unnamed = Vec::new();
-                        for m in meshes {
-                            if let Some(ref name) = m.listing.name {
-                                let key = name.to_lowercase();
-                                let existing = by_name.get(&key);
-                                let dominated = existing.is_some_and(|e|
-                                    e.listing.node_count > m.listing.node_count ||
-                                    (e.listing.node_count == m.listing.node_count && e.published_at >= m.published_at)
-                                );
-                                if !dominated {
-                                    by_name.insert(key, m);
-                                }
-                            } else {
-                                unnamed.push(m);
-                            }
-                        }
-                        let mut result: Vec<nostr::DiscoveredMesh> = by_name.into_values().collect();
-                        result.extend(unnamed);
-                        result.sort_by(|a, b| b.listing.node_count.cmp(&a.listing.node_count));
-                        result
-                    };
                     if let Ok(json) = serde_json::to_string(&meshes) {
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -411,24 +552,27 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         }
 
         // ── Live status ──
-        "/api/status" => {
+        ("GET", "/api/status") => {
             let status = state.status().await;
             let json = serde_json::to_string(&status)?;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                json.len(), json
+                json.len(),
+                json
             );
             stream.write_all(resp.as_bytes()).await?;
         }
 
         // ── SSE event stream ──
-        "/api/events" => {
+        ("GET", "/api/events") => {
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
             stream.write_all(header.as_bytes()).await?;
 
             let status = state.status().await;
             if let Ok(json) = serde_json::to_string(&status) {
-                stream.write_all(format!("data: {json}\n\n").as_bytes()).await?;
+                stream
+                    .write_all(format!("data: {json}\n\n").as_bytes())
+                    .await?;
             }
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -441,8 +585,23 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             }
         }
 
+        // ── Reset API key token ──
+        ("POST", "/api/api-key/reset") => {
+            let token = state.reset_api_key_token().await;
+            let body = serde_json::json!({ "api_key_token": token }).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).await?;
+        }
+
         // ── Chat proxy (routes through inference API port) ──
-        p if p.starts_with("/api/chat") => {
+        (m, p) if m != "POST" && p.starts_with("/api/chat") => {
+            respond_error(&mut stream, 405, "Method Not Allowed").await?;
+        }
+        ("POST", p) if p.starts_with("/api/chat") => {
             let inner = state.inner.lock().await;
             if !inner.llama_ready && !inner.is_client {
                 drop(inner);
@@ -472,6 +631,7 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
     let status = match code {
         400 => "Bad Request",
         405 => "Method Not Allowed",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Not Found",
@@ -481,5 +641,59 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
         body.len(), body
     );
     stream.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+async fn respond_console_index(stream: &mut TcpStream) -> anyhow::Result<bool> {
+    if let Some(file) = CONSOLE_DIST.get_file("index.html") {
+        respond_bytes(
+            stream,
+            200,
+            "OK",
+            "text/html; charset=utf-8",
+            file.contents(),
+        )
+        .await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn respond_console_asset(stream: &mut TcpStream, path: &str) -> anyhow::Result<bool> {
+    let rel = path.trim_start_matches('/');
+    if rel.contains("..") {
+        return Ok(false);
+    }
+    let Some(file) = CONSOLE_DIST.get_file(rel) else {
+        return Ok(false);
+    };
+    let content_type = match rel.rsplit('.').next().unwrap_or("") {
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    respond_bytes(stream, 200, "OK", content_type, file.contents()).await?;
+    Ok(true)
+}
+
+async fn respond_bytes(
+    stream: &mut TcpStream,
+    code: u16,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
     Ok(())
 }
