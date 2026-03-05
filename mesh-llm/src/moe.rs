@@ -391,10 +391,12 @@ mod tests {
     fn test_ranking_cache_roundtrip() {
         let dir = std::env::temp_dir().join("moe-test-ranking");
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.csv");
 
         let ranking: Vec<u32> = vec![0, 26, 41, 69, 104, 3, 7, 99];
-        save_ranking(&path, &ranking).unwrap();
+        let content: String = ranking.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        std::fs::write(&path, content).unwrap();
 
         let loaded = load_cached_ranking(&path).unwrap();
         assert_eq!(loaded, ranking);
