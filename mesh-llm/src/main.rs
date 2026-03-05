@@ -789,6 +789,18 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                 }
             }
         });
+
+        // Nostr re-discovery: if we joined via --auto (Nostr discovery) and lose
+        // all peers, re-discover and join a new mesh. This handles the case where
+        // the original mesh publisher restarts with a new identity.
+        if cli.auto {
+            let rediscover_node = node.clone();
+            let rediscover_relays = nostr_relays(&cli.nostr_relay);
+            let rediscover_relay_urls = cli.relay.clone();
+            tokio::spawn(async move {
+                nostr_rediscovery(rediscover_node, rediscover_relays, rediscover_relay_urls).await;
+            });
+        }
     } else {
         // Originator — generate mesh_id
         let nostr_pubkey = if cli.publish {
@@ -1457,6 +1469,118 @@ fn update_pi_models_json(model_id: &str, port: u16) {
 /// Resolve Nostr relay URLs from CLI or defaults.
 /// Health probe: try QUIC connect to the mesh's bootstrap node.
 /// Returns Ok if reachable within 10s, Err if not.
+/// Re-discover meshes via Nostr when all peers are lost.
+/// Only runs for --auto nodes that originally discovered via Nostr.
+/// Checks every 30s; if 0 peers for 90s straight, re-discovers and joins.
+async fn nostr_rediscovery(
+    node: mesh::Node,
+    nostr_relays: Vec<String>,
+    relay_urls: Vec<String>,
+) {
+    const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    const GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(90);
+
+    // Don't start checking immediately — give the initial connection time to establish
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+    let mut alone_since: Option<std::time::Instant> = None;
+
+    loop {
+        tokio::time::sleep(CHECK_INTERVAL).await;
+
+        let peers = node.peers().await;
+        if !peers.is_empty() {
+            // We have peers — reset the timer
+            if alone_since.is_some() {
+                tracing::debug!("Nostr rediscovery: peers recovered, resetting timer");
+                alone_since = None;
+            }
+            continue;
+        }
+
+        // Zero peers
+        let now = std::time::Instant::now();
+        let start = *alone_since.get_or_insert(now);
+
+        if now.duration_since(start) < GRACE_PERIOD {
+            tracing::debug!(
+                "Nostr rediscovery: 0 peers for {}s (grace: {}s)",
+                now.duration_since(start).as_secs(),
+                GRACE_PERIOD.as_secs()
+            );
+            continue;
+        }
+
+        // Grace period expired — re-discover
+        eprintln!("🔍 Lost all peers — re-discovering meshes via Nostr...");
+
+        let filter = nostr::MeshFilter::default();
+        let meshes = match nostr::discover(&nostr_relays, &filter).await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("⚠️  Nostr re-discovery failed: {e}");
+                // Reset timer so we don't spam
+                alone_since = Some(std::time::Instant::now());
+                continue;
+            }
+        };
+
+        if meshes.is_empty() {
+            eprintln!("⚠️  No meshes found on Nostr — will retry");
+            alone_since = Some(std::time::Instant::now());
+            continue;
+        }
+
+        // Try to join the best mesh
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last_mesh_id = mesh::load_last_mesh_id();
+
+        let mut candidates: Vec<_> = meshes.iter()
+            .map(|m| {
+                let score = nostr::score_mesh(m, now_ts, last_mesh_id.as_deref());
+                (m, score)
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut rejoined = false;
+        for (mesh, _score) in &candidates {
+            let token = &mesh.listing.invite_token;
+            match probe_mesh_health(token, &relay_urls).await {
+                Ok(()) => {
+                    eprintln!("✅ Re-joining: {} ({} nodes)",
+                        mesh.listing.name.as_deref().unwrap_or("unnamed"),
+                        mesh.listing.node_count);
+                    match node.join(token).await {
+                        Ok(()) => {
+                            eprintln!("📡 Re-joined mesh via Nostr re-discovery");
+                            rejoined = true;
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️  Re-join failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Mesh probe failed during rediscovery: {e}");
+                }
+            }
+            if rejoined { break; }
+        }
+
+        if rejoined {
+            // Reset — if we lose peers again, the cycle restarts
+            alone_since = None;
+        } else {
+            eprintln!("⚠️  Could not re-join any mesh — will retry");
+            alone_since = Some(std::time::Instant::now());
+        }
+    }
+}
+
 async fn probe_mesh_health(invite_token: &str, relay_urls: &[String]) -> Result<()> {
     use base64::Engine;
     let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
