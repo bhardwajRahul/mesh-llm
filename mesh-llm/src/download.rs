@@ -329,6 +329,26 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         moe: None,
         extra_files: &[],
     },
+    // ── XXL (100GB+ VRAM, split GGUF) ─────────────────────────────
+    CatalogModel {
+        name: "MiniMax-M2.5-Q4_K_M",
+        file: "MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf",
+        url: "https://huggingface.co/unsloth/MiniMax-M2.5-GGUF/resolve/main/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf",
+        size: "138GB",
+        description: "MiniMax-M2.5 MoE 456B/46B active, 256 experts top-8, Q4_K_M",
+        draft: None,
+        moe: Some(MoeConfig {
+            n_expert: 256,
+            n_expert_used: 8,
+            min_experts_per_node: 96,
+            ranking: &[],
+        }),
+        extra_files: &[
+            ("MiniMax-M2.5-Q4_K_M-00002-of-00004.gguf", "https://huggingface.co/unsloth/MiniMax-M2.5-GGUF/resolve/main/Q4_K_M/MiniMax-M2.5-Q4_K_M-00002-of-00004.gguf"),
+            ("MiniMax-M2.5-Q4_K_M-00003-of-00004.gguf", "https://huggingface.co/unsloth/MiniMax-M2.5-GGUF/resolve/main/Q4_K_M/MiniMax-M2.5-Q4_K_M-00003-of-00004.gguf"),
+            ("MiniMax-M2.5-Q4_K_M-00004-of-00004.gguf", "https://huggingface.co/unsloth/MiniMax-M2.5-GGUF/resolve/main/Q4_K_M/MiniMax-M2.5-Q4_K_M-00004-of-00004.gguf"),
+        ],
+    },
     // ── Draft models ────────────────────────────────────────────────
     CatalogModel {
         name: "Qwen2.5-0.5B-Instruct-Q4_K_M",
