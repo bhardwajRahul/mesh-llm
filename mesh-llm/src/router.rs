@@ -339,14 +339,21 @@ pub fn pick_model<'a>(
             let profile = profile_for(name);
             let tier = profile.map(|p| p.tier).unwrap_or(1) as i32;
 
-            // Strength match bonus: primary strength = +20, secondary = +10, any match = +5
-            let strength_bonus = profile
+            // Task match is the primary signal. If a model lists this category
+            // as a strength, it gets a massive bonus that tier alone can never beat.
+            // Among models that match, tier + position break ties.
+            // Models that don't match only win if NOTHING matches.
+            let has_match = profile
+                .map(|p| p.strengths.contains(&category))
+                .unwrap_or(false);
+
+            let match_bonus = if has_match { 1000 } else { 0 };
+
+            // Within matched models: primary > secondary > listed
+            let position_bonus = profile
                 .map(|p| {
-                    p.strengths
-                        .iter()
-                        .enumerate()
-                        .find(|(_, s)| **s == category)
-                        .map(|(i, _)| match i {
+                    p.strengths.iter().position(|s| *s == category)
+                        .map(|i| match i {
                             0 => 20,
                             1 => 10,
                             _ => 5,
@@ -358,7 +365,8 @@ pub fn pick_model<'a>(
             // Speed bonus: normalize tok/s to 0-10 range (100+ tok/s = max bonus)
             let speed_bonus = (tok_s / 10.0).min(10.0) as i32;
 
-            let score = tier * 10 + strength_bonus + speed_bonus;
+            // match_bonus gates entry. Tier + position + speed break ties.
+            let score = match_bonus + tier * 10 + position_bonus + speed_bonus;
             (*name, score)
         })
         .collect();
