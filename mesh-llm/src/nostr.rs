@@ -284,45 +284,54 @@ pub async fn publish_loop(
             continue;
         }
 
-        // ── Split-heal: if we're solo, check if a bigger mesh exists with our mesh_id ──
-        // This handles the case where a node temporarily loses connectivity,
-        // goes solo, and starts publishing independently. When the bigger mesh
-        // is still out there, we should rejoin it instead of fragmenting.
+        // ── Solo convergence: if we have no GPU peers, look for a mesh to join ──
+        // First try split-heal (same mesh_id, different publisher, more nodes).
+        // Then try merging with any other mesh (different mesh, unnamed only).
         let gpu_peers = peers.iter()
             .filter(|p| !matches!(p.role, crate::mesh::NodeRole::Client))
             .count();
         if gpu_peers == 0 {
-            let my_mesh_id = node.mesh_id().await;
-            if let Some(ref mid) = my_mesh_id {
-                let filter = MeshFilter::default();
-                if let Ok(listings) = discover(&relays, &filter).await {
-                    let my_npub = publisher.npub();
-                    // Find a listing for our mesh_id from a different publisher with more nodes
-                    let bigger = listings.iter().find(|m| {
+            let filter = MeshFilter::default();
+            if let Ok(listings) = discover(&relays, &filter).await {
+                let my_npub = publisher.npub();
+                let my_mesh_id = node.mesh_id().await;
+
+                // 1. Split-heal: same mesh_id from a different publisher with more nodes
+                let split_target = my_mesh_id.as_ref().and_then(|mid| {
+                    listings.iter().find(|m| {
                         m.listing.mesh_id.as_deref() == Some(mid.as_str())
                             && m.publisher_npub != my_npub
                             && m.listing.node_count > 1
-                    });
-                    if let Some(target) = bigger {
-                        eprintln!("📡 Found larger mesh '{}' ({} nodes) — rejoining instead of publishing solo",
-                            target.listing.name.as_deref().unwrap_or("unnamed"),
-                            target.listing.node_count);
-                        // Stop publishing our solo listing
-                        if let Err(e) = publisher.unpublish().await {
-                            tracing::warn!("Failed to unpublish solo listing: {e}");
-                        }
-                        // Rejoin the bigger mesh
-                        if let Err(e) = node.join(&target.listing.invite_token).await {
-                            tracing::warn!("Split-heal rejoin failed: {e}");
-                            // Continue publishing as fallback
-                            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-                            continue;
-                        }
-                        eprintln!("📡 Rejoined mesh — resuming publish as member");
-                        // Brief pause to let gossip settle before next publish cycle
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    })
+                });
+
+                // 2. Merge: any unnamed mesh from a different publisher
+                //    (only for unnamed meshes — named meshes are intentionally separate)
+                let merge_target = if split_target.is_none() && name.is_none() {
+                    listings.iter().find(|m| {
+                        m.publisher_npub != my_npub
+                            && m.listing.name.is_none()
+                            && m.listing.node_count >= 1
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(target) = split_target.or(merge_target) {
+                    eprintln!("📡 Found larger mesh '{}' ({} nodes) — rejoining instead of publishing solo",
+                        target.listing.name.as_deref().unwrap_or("unnamed"),
+                        target.listing.node_count);
+                    if let Err(e) = publisher.unpublish().await {
+                        tracing::warn!("Failed to unpublish solo listing: {e}");
+                    }
+                    if let Err(e) = node.join(&target.listing.invite_token).await {
+                        tracing::warn!("Merge/rejoin failed: {e}");
+                        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
                         continue;
                     }
+                    eprintln!("📡 Merged into mesh — resuming publish as member");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
                 }
             }
         }
