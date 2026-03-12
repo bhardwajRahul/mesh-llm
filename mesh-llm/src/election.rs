@@ -33,6 +33,7 @@ pub fn total_model_bytes(model: &Path) -> u64 {
     std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
 }
 
+use std::sync::Arc;
 use tokio::sync::watch;
 
 /// Determine if this node should be host for its model group.
@@ -251,7 +252,7 @@ pub async fn election_loop(
     draft: Option<std::path::PathBuf>,
     draft_max: u16,
     force_split: bool,
-    target_tx: watch::Sender<ModelTargets>,
+    target_tx: Arc<watch::Sender<ModelTargets>>,
     mut on_change: impl FnMut(bool, bool) + Send,
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
@@ -567,7 +568,7 @@ async fn moe_election_loop(
     moe_cfg: download::MoeConfig,
     my_vram: u64,
     model_bytes: u64,
-    target_tx: watch::Sender<ModelTargets>,
+    target_tx: Arc<watch::Sender<ModelTargets>>,
     on_change: &mut impl FnMut(bool, bool),
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
@@ -733,10 +734,28 @@ async fn update_targets(
     node: &mesh::Node,
     my_model: &str,
     my_target: InferenceTarget,
-    target_tx: &watch::Sender<ModelTargets>,
+    target_tx: &Arc<watch::Sender<ModelTargets>>,
 ) {
     let peers = node.peers().await;
     let mut targets: HashMap<String, Vec<InferenceTarget>> = HashMap::new();
+
+    // Start from the current targets — preserve local targets set by other election loops
+    // (multi-model per node: each loop manages its own model's entry)
+    {
+        let current = target_tx.borrow();
+        for (model, model_targets) in &current.targets {
+            if model != my_model {
+                // Keep only Local targets from other loops — remote targets get rebuilt below
+                let locals: Vec<_> = model_targets.iter()
+                    .filter(|t| matches!(t, InferenceTarget::Local(_) | InferenceTarget::MoeLocal(_)))
+                    .cloned()
+                    .collect();
+                if !locals.is_empty() {
+                    targets.insert(model.clone(), locals);
+                }
+            }
+        }
+    }
 
     // Our model — we're always first in the list
     if !matches!(my_target, InferenceTarget::None) {

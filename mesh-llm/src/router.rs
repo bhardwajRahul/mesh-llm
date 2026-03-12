@@ -217,10 +217,14 @@ pub fn classify(body: &Value) -> Category {
     // 2. Code signals
     let code_signals = [
         "```", "def ", "fn ", "func ", "class ", "import ",
-        "function ", "const ", "let ", "var ", "return ",
+        "function", "const ", "let ", "var ", "return ",
         "write a program", "write code", "implement", "refactor",
         "debug", "fix the bug", "write a script", "code review",
         "pull request", "git ", "compile", "syntax",
+        "python", "javascript", "typescript", " rust ", "golang",
+        "java ", "c++", " ruby ", " swift ", "kotlin",
+        "algorithm", "binary search", " sort ", "regex",
+        " api ", " http ", " sql ", "database", " query ",
     ];
     let code_score: usize = code_signals.iter()
         .filter(|s| lower.contains(*s))
