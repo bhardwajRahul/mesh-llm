@@ -26,14 +26,16 @@ def process_csv(input_path, output_path, min_date=None, max_amount=None):
             rows.append(row)
 
     # Sort by amount descending
-    rows.sort(key=lambda r: r['amount'])  # Bug: sorts as string, not float
+    rows.sort(key=lambda r: r['amount_float'])  # Fixed: sort as float
 
     # Write output
     if rows:
         with open(output_path, 'w') as f:
             writer = csv.DictWriter(f, fieldnames=rows[0].keys())
             writer.writeheader()
-            writer.writerows(rows)  # Bug: date_parsed is datetime, not serializable
+            # Remove parsed fields before writing (datetime not serializable)
+            rows_to_write = [{k: v for k, v in r.items() if k not in ('date_parsed', 'amount_float')} for r in rows]
+            writer.writerows(rows_to_write)
             print(f"Wrote {len(rows)} rows")
     else:
         print("No rows matched filters")

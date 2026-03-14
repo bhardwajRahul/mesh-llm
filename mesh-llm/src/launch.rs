@@ -158,18 +158,10 @@ pub async fn start_llama_server(
 
     // llama-server uses --rpc only for remote workers.
     // The host's own GPU is used directly via Metal (no local rpc-server in the list).
-    // Context size: scale with model size. Smaller models can afford bigger contexts
-    // (KV cache is proportional to hidden_dim × n_layers × ctx_size).
-    // These are practical defaults that fit in the VRAM headroom left by auto packs.
-    let ctx_size: u32 = if model_bytes < 5 * GB {
-        32768  // small models: 32K — cheap KV cache, use it
-    } else if model_bytes < 20 * GB {
-        16384  // mid models (7B-14B): 16K — good for most tasks
-    } else if model_bytes < 50 * GB {
-        8192   // large models (27B-32B): 8K — balance quality vs VRAM
-    } else {
-        8192   // frontier (70B+): 8K — agents need context for tools/system prompts
-    };
+    // Context size: 32K for everything. Agents need large context for system prompts,
+    // tool schemas, and multi-turn conversations. With q4_0/q8_0 KV cache compression
+    // this is cheap even for large models.
+    let ctx_size: u32 = 32768;
     tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB)", model_bytes as f64 / GB as f64);
 
     let mut args = vec![
