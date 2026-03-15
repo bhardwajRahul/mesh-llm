@@ -1,22 +1,34 @@
 # mesh-llm TODO
 
-## Connection Stability — Studio relay decay
+## Connection Stability — Studio-specific
 
-Studio's relay connections degrade over hours until fully isolated (~10 hours). Pattern:
-- Fresh restart: connects fine, RTTs 250-400ms via relay
-- Over hours: RTTs climb 400→1000→2000→5000ms
-- Eventually: 0 peers, can't reconnect, Nostr rediscovery fails
-- Restart fixes it immediately
+**Studio is the problem, not the relay.** 5-minute drop count comparison on dedicated iroh relay:
+- Local: **1 drop** (and that 1 was to Studio)
+- Mini: **15 drops** (all to Studio)
+- Studio: **100 drops**
 
-Confirmed via heartbeat debug logging (v0.35.2). Not a deadlock (heartbeat runs every 60s). Not code — ephemeral test also fails when Studio is isolated. Likely relay or iroh transport issue. **All peers** (Local, Mini, Fly console, Fly API) lose Studio simultaneously.
+Mini↔Fly nodes are rock solid (0 failures across all heartbeats). Local↔Fly and Local↔Mini also 100% stable. Only connections involving Studio flap. Even Local→Studio on the same LAN (10ms direct path) times out periodically.
 
-**STUN also fails** on Studio (`STUN: could not discover public address`). Both machines share public IP `180.181.228.108` — hairpin NAT means LAN UDP works but STUN from the same public IP doesn't help.
+Dedicated iroh relay (`usw1-2.relay.michaelneale.mesh-llm.iroh.link`) works great for everyone except Studio. Switched from old Fly relay in v0.35.2.
 
 Next steps:
-- [ ] Add relay health monitoring (log relay reconnects, detect stale relay)
-- [ ] Try iroh default relays alongside Fly relay (maybe Fly relay specifically degrades)
-- [ ] Add periodic relay reconnect (if no peers for N minutes, force relay cycle)
-- [ ] Profile iroh relay websocket — is it the relay server or the client connection dying?
+- [ ] Check Studio's macOS firewall settings — is it interfering with iroh's UDP/QUIC?
+- [ ] Check Studio's sleep/power settings — is the network interface sleeping?
+- [ ] Test Studio with a fresh identity (delete `~/.mesh-llm/key`)
+- [ ] Run `iroh doctor` or similar diagnostics on Studio vs Mini
+- [ ] Check if Studio has any network extensions, VPN, or Little Snitch
+- [ ] Profile iroh endpoint on Studio — is it the QUIC layer or the relay websocket?
+
+## Mac Native App
+
+Simple native macOS app (SwiftUI) that starts or joins a mesh.
+
+- Menubar app or lightweight window
+- If machine has large VRAM (≥24GB): offer to **start** a mesh (runs mesh-llm --auto, shows invite QR)
+- If machine has small VRAM: offer to **join** a mesh (paste/scan invite token, client-only)
+- Shows mesh status: peers, models, throughput
+- Bundles mesh-llm binary, manages lifecycle (start/stop/restart)
+- First-class macOS citizen: signed, notarized, drag-to-Applications
 
 ## Mobile Chat App (exemplar)
 

@@ -516,19 +516,16 @@ impl Node {
         {
             use iroh::{RelayConfig, RelayMap};
             let urls: Vec<String> = if relay_urls.is_empty() {
-                vec!["https://mesh-llm-relay.fly.dev./".into()]
+                vec!["https://usw1-2.relay.michaelneale.mesh-llm.iroh.link./".into()]
             } else {
                 relay_urls.to_vec()
             };
-            // Our relay(s) for traffic (no QUIC/STUN — behind Fly HTTP proxy)
+            // Dedicated iroh relay — proper QUIC relay with STUN support.
+            // Also include iroh's default relays for additional STUN/UDP discovery.
             let configs: Vec<RelayConfig> = urls.iter().map(|url| {
                 RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
             }).collect();
             let relay_map = RelayMap::from_iter(configs);
-            // Add iroh's default relays for STUN/UDP discovery.
-            // Our Fly relay can't do STUN (HTTP-only proxy), but iroh's relays can.
-            // This gives us working UDP path discovery while using our relay for data.
-            // STUN is raw UDP (no TLS certs), so cert-constrained machines work fine.
             relay_map.extend(&iroh::defaults::prod::default_relay_map());
             tracing::info!("Relay: {:?}", urls);
             builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map));
