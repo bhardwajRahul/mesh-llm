@@ -2753,6 +2753,9 @@ function ChatBubble({
   onReasoningToggle: (open: boolean) => void;
 }) {
   const isUser = message.role === 'user';
+  const isThinking = !isUser && message.reasoning && !message.content;
+  const hasFinishedThinking = !isUser && message.reasoning && !!message.content;
+
   return (
     <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
       <div className="w-full max-w-[92%] md:max-w-[82%]">
@@ -2761,32 +2764,54 @@ function ChatBubble({
           <span>{isUser ? 'You' : 'Assistant'}</span>
           {message.model ? <span>· {shortName(message.model)}</span> : null}
         </div>
-        <div
-          className={cn(
-            'rounded-lg border px-4 py-3 text-sm leading-6 break-words',
-            isUser
-              ? 'bg-muted whitespace-pre-wrap'
-              : message.error
-                ? 'border-destructive/50 text-destructive'
-                : 'bg-background',
-          )}
-        >
-          {message.content ? <MarkdownMessage content={message.content} /> : !isUser ? '...' : ''}
-        </div>
-        {message.reasoning ? (
-          <Card className="mt-2">
-            <CardContent className="p-3">
-              <Accordion type="single" collapsible value={reasoningOpen ? 'reasoning' : ''} onValueChange={(v) => onReasoningToggle(v === 'reasoning')}>
-                <AccordionItem value="reasoning" className="border-b-0">
-                  <AccordionTrigger className="py-0 text-xs">Reasoning</AccordionTrigger>
-                  <AccordionContent>
-                    <div className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{message.reasoning}</div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
-            </CardContent>
-          </Card>
+
+        {/* Thinking indicator — shown above the response */}
+        {isThinking ? (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>Thinking…</span>
+          </div>
         ) : null}
+
+        {/* Collapsed reasoning accordion — shown after thinking is done */}
+        {hasFinishedThinking ? (
+          <Accordion
+            type="single"
+            collapsible
+            value={reasoningOpen ? 'reasoning' : ''}
+            onValueChange={(v) => onReasoningToggle(v === 'reasoning')}
+            className="mb-2"
+          >
+            <AccordionItem value="reasoning" className="rounded-lg border border-dashed px-3">
+              <AccordionTrigger className="py-2 text-xs text-muted-foreground hover:no-underline">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="h-3 w-3" />
+                  Thought for a moment
+                </span>
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{message.reasoning}</div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+        ) : null}
+
+        {/* Main content */}
+        {isUser || message.content ? (
+          <div
+            className={cn(
+              'rounded-lg border px-4 py-3 text-sm leading-6 break-words',
+              isUser
+                ? 'bg-muted whitespace-pre-wrap'
+                : message.error
+                  ? 'border-destructive/50 text-destructive'
+                  : 'bg-background',
+            )}
+          >
+            {message.content ? <MarkdownMessage content={message.content} /> : !isUser ? '...' : ''}
+          </div>
+        ) : null}
+
         {message.stats ? <div className="mt-1 px-1 text-xs text-muted-foreground">{message.stats}</div> : null}
       </div>
     </div>
