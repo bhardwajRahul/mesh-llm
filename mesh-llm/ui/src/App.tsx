@@ -1888,9 +1888,7 @@ function ChatPage(props: {
 function InviteFriendEmptyState({ inviteToken, selectedModel }: { inviteToken: string; selectedModel: string }) {
   const [open, setOpen] = useState(false);
   const [inviteWithModelCopied, setInviteWithModelCopied] = useState(false);
-  const [inviteClientCopied, setInviteClientCopied] = useState(false);
   const inviteWithModelCommand = inviteToken && selectedModel ? `mesh-llm --join ${inviteToken} --model ${selectedModel}` : '';
-  const inviteClientCommand = inviteToken ? `mesh-llm --client --join ${inviteToken}` : '';
 
   async function copyInviteWithModelCommand() {
     if (!inviteWithModelCommand) return;
@@ -1903,43 +1901,27 @@ function InviteFriendEmptyState({ inviteToken, selectedModel }: { inviteToken: s
     }
   }
 
-  async function copyInviteClientCommand() {
-    if (!inviteClientCommand) return;
-    try {
-      await navigator.clipboard.writeText(inviteClientCommand);
-      setInviteClientCopied(true);
-      window.setTimeout(() => setInviteClientCopied(false), 1500);
-    } catch {
-      setInviteClientCopied(false);
-    }
-  }
-
   return (
     <div className="mx-auto w-full max-w-md space-y-4 px-2 text-center">
-      <div className="space-y-1">
-        <p className="text-sm text-muted-foreground">
-          This is a shared community GPU pool — chat for free, powered by people contributing spare compute.
-        </p>
-      </div>
+      <p className="text-sm text-muted-foreground">
+        A shared pool of compute, powered by the community. Chat away.
+      </p>
       <button
         type="button"
         onClick={() => setOpen(!open)}
         className="mx-auto flex items-center gap-1.5 text-xs text-muted-foreground/70 hover:text-foreground transition-colors"
       >
         <ChevronDown className={cn('h-3 w-3 transition-transform', open ? '' : '-rotate-90')} />
-        <span>Add your GPU to the pool</span>
+        <span>More info…</span>
       </button>
       {open ? (
-        <div className="space-y-3 rounded-md border border-dashed p-3 text-left">
-          <div className="text-xs text-muted-foreground">
-            Got a spare GPU? Join the mesh and share compute with the community.{' '}
-            <a href="https://mesh-llm.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
-              Learn more →
-            </a>
-          </div>
-          {inviteWithModelCommand ? (
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium">Contribute compute &amp; join the chat</div>
+        <div className="space-y-4 rounded-md border border-dashed p-3 text-left">
+          <div className="space-y-2">
+            <div className="text-xs font-medium">Contribute to the pool</div>
+            <div className="text-xs text-muted-foreground">
+              Have a spare machine? Add it to this mesh and share compute with others.
+            </div>
+            {inviteWithModelCommand ? (
               <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
                 <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
                   {inviteWithModelCommand}
@@ -1955,28 +1937,18 @@ function InviteFriendEmptyState({ inviteToken, selectedModel }: { inviteToken: s
                   {inviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                 </Button>
               </div>
+            ) : null}
+          </div>
+          <Separator />
+          <div className="space-y-2">
+            <div className="text-xs font-medium">Run your own private mesh</div>
+            <div className="text-xs text-muted-foreground">
+              Pool machines across your home, office, or friends — fully private, no cloud needed.{' '}
+              <a href="https://mesh-llm.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                Getting started →
+              </a>
             </div>
-          ) : null}
-          {inviteClientCommand ? (
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium">Join as API client only</div>
-              <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
-                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
-                  {inviteClientCommand}
-                </code>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7 shrink-0"
-                  aria-label="Copy command"
-                  onClick={() => void copyInviteClientCommand()}
-                >
-                  {inviteClientCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-            </div>
-          ) : null}
+          </div>
         </div>
       ) : null}
     </div>
