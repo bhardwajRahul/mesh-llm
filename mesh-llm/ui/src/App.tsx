@@ -987,7 +987,7 @@ export function App() {
           inviteClientCommand={inviteClientCommand}
           inviteToken={inviteToken}
           apiDirectUrl={apiDirectUrl}
-
+          isPublicMesh={status?.nostr_discovery ?? false}
         />
 
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -1090,6 +1090,7 @@ function AppHeader({
   inviteClientCommand,
   inviteToken,
   apiDirectUrl,
+  isPublicMesh,
 }: {
   sections: Array<{ key: TopSection; label: string }>;
   section: TopSection;
@@ -1102,6 +1103,7 @@ function AppHeader({
   inviteClientCommand: string;
   inviteToken: string;
   apiDirectUrl: string;
+  isPublicMesh: boolean;
 }) {
   const [inviteWithModelCopied, setInviteWithModelCopied] = useState(false);
   const [inviteClientCopied, setInviteClientCopied] = useState(false);
@@ -1235,10 +1237,41 @@ function AppHeader({
                   </Button>
                 </div>
               ) : null}
-              <div className="text-xs text-muted-foreground">
-                Use with Claude Code, Goose, pi, or any OpenAI-compatible client.{' '}
-                <a href={`${DOCS_URL}/#agents`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
-                  Setup guide →
+              <div className="space-y-2 pt-1">
+                <div className="text-xs font-medium">Use with agents</div>
+                <div className="space-y-1">
+                  {['claude', 'goose'].map((agent) => {
+                    const cmd = isPublicMesh ? `mesh-llm ${agent}` : `mesh-llm ${agent} --join ${inviteToken || '(token)'}`;
+                    return (
+                      <div key={agent} className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                          {cmd}
+                        </code>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-6 w-6 shrink-0"
+                          aria-label={`Copy ${agent} command`}
+                          onClick={() => void navigator.clipboard.writeText(cmd)}
+                        >
+                          <Copy className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Also works with pi and any OpenAI-compatible client.{' '}
+                  <a href={`${DOCS_URL}/#agents`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                    Setup guide →
+                  </a>
+                </div>
+              </div>
+              <div className="text-xs text-muted-foreground pt-1">
+                Don't have it yet?{' '}
+                <a href={`${DOCS_URL}/#install`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                  Install mesh-llm →
                 </a>
               </div>
               </PopoverContent>
@@ -1844,32 +1877,24 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
           className="mx-auto flex items-center gap-1.5 text-xs text-muted-foreground/70 hover:text-foreground transition-colors"
         >
           <ChevronDown className={cn('h-3 w-3 transition-transform', open ? '' : '-rotate-90')} />
-          <span>More info…</span>
+          <span>Learn more…</span>
         </button>
         {open ? (
           <div className="space-y-4 rounded-md border border-dashed p-3 text-left">
+            <div className="text-xs text-muted-foreground">
+              <a href="https://github.com/michaelneale/decentralized-inference" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                Learn about this new project →
+              </a>
+            </div>
+            <Separator />
             <div className="space-y-2">
               <div className="text-xs font-medium">Contribute to the pool</div>
               <div className="text-xs text-muted-foreground">
                 Have a spare machine? Add it to this mesh and share compute with others.
               </div>
-              {inviteWithModelCommand ? (
-                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
-                  <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
-                    {inviteWithModelCommand}
-                  </code>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 shrink-0"
-                    aria-label="Copy command"
-                    onClick={() => void copyInviteWithModelCommand()}
-                  >
-                    {inviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                </div>
-              ) : null}
+              <code className="block rounded-md border bg-muted/40 px-2 py-1.5 text-xs">
+                mesh-llm --auto
+              </code>
             </div>
             <Separator />
             <div className="space-y-2">
@@ -1930,8 +1955,9 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
             </Button>
           </div>
           <div className="text-xs text-muted-foreground pt-1">
-            <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
-              Docs — models, agents, common patterns →
+            Don't have it yet?{' '}
+            <a href={`${DOCS_URL}/#install`} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+              Install mesh-llm →
             </a>
           </div>
         </div>
