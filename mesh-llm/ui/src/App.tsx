@@ -1070,7 +1070,7 @@ export function App() {
                   topologyNodes={topologyNodes}
                   selectedModel={selectedModel || status?.model_name || ''}
                   themeMode={themeMode}
-                  isPublicMesh={isPublicMesh}
+                  isPublicMesh={status?.nostr_discovery ?? false}
                   inviteToken={inviteToken}
                   isLocalhost={isLocalhost}
                 />
@@ -2017,7 +2017,7 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
           <BrandIcon className="h-12 w-12 text-primary/50 animate-wiggle" />
         </div>
         <p className="text-sm text-muted-foreground">
-          Chat here if you like, powered by shared spare compute capacity.
+          Chat: powered by shared compute.
         </p>
         <button
           type="button"
