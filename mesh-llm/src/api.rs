@@ -563,6 +563,126 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             }
         }
 
+        // ── Knowledge whiteboard ──
+        ("GET", "/api/knowledge/feed") => {
+            let node = state.inner.lock().await.node.clone();
+            if !node.knowledge.is_enabled() {
+                respond_error(&mut stream, 404, "Knowledge not enabled (start with --knowledge)").await?;
+            } else {
+                let query_str = path.split('?').nth(1).unwrap_or("");
+                let params: Vec<(&str, &str)> = query_str.split('&')
+                    .filter_map(|p| p.split_once('='))
+                    .collect();
+                let from = params.iter().find(|(k, _)| *k == "from").map(|(_, v)| *v);
+                let limit: usize = params.iter().find(|(k, _)| *k == "limit")
+                    .and_then(|(_, v)| v.parse().ok()).unwrap_or(20);
+                let items = if let Some(f) = from {
+                    let mut items = node.knowledge.from_peer(f).await;
+                    items.truncate(limit);
+                    items
+                } else {
+                    let mut items = node.knowledge.all().await;
+                    items.truncate(limit);
+                    items
+                };
+                let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    json.len(), json
+                );
+                stream.write_all(resp.as_bytes()).await?;
+            }
+        }
+
+        ("GET", "/api/knowledge/search") => {
+            let node = state.inner.lock().await.node.clone();
+            if !node.knowledge.is_enabled() {
+                respond_error(&mut stream, 404, "Knowledge not enabled (start with --knowledge)").await?;
+            } else {
+                let query_str = path.split('?').nth(1).unwrap_or("");
+                let params: Vec<(&str, &str)> = query_str.split('&')
+                    .filter_map(|p| p.split_once('='))
+                    .collect();
+                let q = params.iter().find(|(k, _)| *k == "q").map(|(_, v)| *v).unwrap_or("");
+                let limit: usize = params.iter().find(|(k, _)| *k == "limit")
+                    .and_then(|(_, v)| v.parse().ok()).unwrap_or(20);
+                let decoded_q = q.replace('+', " ").replace("%20", " ");
+                let mut items = node.knowledge.search(&decoded_q).await;
+                items.truncate(limit);
+                let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    json.len(), json
+                );
+                stream.write_all(resp.as_bytes()).await?;
+            }
+        }
+
+        ("GET", p) if p.starts_with("/api/knowledge/thread/") => {
+            let node = state.inner.lock().await.node.clone();
+            if !node.knowledge.is_enabled() {
+                respond_error(&mut stream, 404, "Knowledge not enabled (start with --knowledge)").await?;
+            } else {
+                let id_prefix = &p["/api/knowledge/thread/".len()..];
+                // Find item by hex ID prefix
+                let items = node.knowledge.all().await;
+                let target = items.iter().find(|i| format!("{:x}", i.id).starts_with(id_prefix));
+                let result = if let Some(t) = target {
+                    node.knowledge.thread(t.id).await
+                } else {
+                    vec![]
+                };
+                let json = serde_json::to_string(&result).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    json.len(), json
+                );
+                stream.write_all(resp.as_bytes()).await?;
+            }
+        }
+
+        ("POST", "/api/knowledge/post") => {
+            let node = state.inner.lock().await.node.clone();
+            if !node.knowledge.is_enabled() {
+                respond_error(&mut stream, 404, "Knowledge not enabled (start with --knowledge)").await?;
+            } else {
+                // Parse JSON body
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
+                match parsed {
+                    Ok(val) => {
+                        let text = val["text"].as_str().unwrap_or("").to_string();
+                        if text.is_empty() {
+                            respond_error(&mut stream, 400, "Missing 'text' field").await?;
+                        } else {
+                            let reply_to = if let Some(s) = val["reply_to"].as_str() {
+                                let all_items = node.knowledge.all().await;
+                                all_items.iter().find(|i| format!("{:x}", i.id).starts_with(s)).map(|i| i.id)
+                            } else {
+                                None
+                            };
+                            let peer_name = node.peer_name().await;
+                            let peer_id_hex = format!("{}", node.id().fmt_short());
+                            let item = crate::knowledge::KnowledgeItem::new(
+                                peer_name, peer_id_hex, text, reply_to,
+                            );
+                            node.knowledge.insert(item.clone()).await;
+                            node.broadcast_knowledge(&item).await;
+                            let json = serde_json::to_string(&item).unwrap_or_else(|_| "{}".into());
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                json.len(), json
+                            );
+                            stream.write_all(resp.as_bytes()).await?;
+                        }
+                    }
+                    Err(_) => {
+                        respond_error(&mut stream, 400, "Invalid JSON body").await?;
+                    }
+                }
+            }
+        }
+
         // ── Chat proxy (routes through inference API port) ──
         (m, p) if m != "POST" && p.starts_with("/api/chat") => {
             respond_error(&mut stream, 405, "Method Not Allowed").await?;

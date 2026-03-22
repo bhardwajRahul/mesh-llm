@@ -53,6 +53,7 @@ pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
 const STREAM_ROUTE_REQUEST: u8 = 0x05;
 const STREAM_PEER_DOWN: u8 = 0x06;
 const STREAM_PEER_LEAVING: u8 = 0x07;
+const STREAM_KNOWLEDGE: u8 = 0x08;
 
 /// Role a node plays in the mesh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -431,6 +432,8 @@ pub struct Node {
     inflight_change_tx: watch::Sender<u64>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     tunnel_http_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    pub knowledge: crate::knowledge::KnowledgeStore,
+    knowledge_name: Arc<Mutex<Option<String>>>,
 }
 
 struct MeshState {
@@ -598,6 +601,8 @@ impl Node {
             inflight_change_tx,
             tunnel_tx,
             tunnel_http_tx,
+            knowledge: crate::knowledge::KnowledgeStore::new(false),
+            knowledge_name: Arc::new(Mutex::new(None)),
         };
 
         // Accept loop starts but waits for start_accepting() before processing connections.
@@ -676,6 +681,21 @@ impl Node {
 
     pub async fn serving_models(&self) -> Vec<String> {
         self.serving_models.lock().await.clone()
+    }
+
+    /// Set the display name for knowledge whiteboard posts.
+    pub async fn set_knowledge_name(&self, name: String) {
+        *self.knowledge_name.lock().await = Some(name);
+    }
+
+    /// Get the display name for this node (for knowledge posts).
+    /// Falls back to the short endpoint ID if no name is set.
+    pub async fn peer_name(&self) -> String {
+        if let Some(ref name) = *self.knowledge_name.lock().await {
+            name.clone()
+        } else {
+            self.endpoint.id().fmt_short().to_string()
+        }
     }
 
     /// Re-gossip our state to all connected peers.
@@ -1041,6 +1061,190 @@ impl Node {
         }
         // Give broadcasts a moment to flush
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// Broadcast a knowledge item to all connected peers (flood-fill).
+    pub async fn broadcast_knowledge(&self, item: &crate::knowledge::KnowledgeItem) {
+        if !self.knowledge.is_enabled() { return; }
+        let msg = crate::knowledge::KnowledgeMessage::Post(item.clone());
+        let data = match serde_json::to_vec(&msg) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let conns: Vec<(EndpointId, Connection)> = {
+            let state = self.state.lock().await;
+            state.connections.iter().map(|(id, c)| (*id, c.clone())).collect()
+        };
+        for (peer_id, conn) in conns {
+            let bytes = data.clone();
+            tokio::spawn(async move {
+                let res = async {
+                    let (mut send, _recv) = conn.open_bi().await?;
+                    send.write_all(&[STREAM_KNOWLEDGE]).await?;
+                    send.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+                    send.write_all(&bytes).await?;
+                    send.finish()?;
+                    Ok::<_, anyhow::Error>(())
+                }.await;
+                if let Err(e) = res {
+                    tracing::debug!("Failed to broadcast knowledge to {}: {e}", peer_id.fmt_short());
+                }
+            });
+        }
+    }
+
+    /// Sync knowledge with a peer: exchange digests, fetch missing items.
+    pub async fn sync_knowledge(&self, conn: Connection, remote: EndpointId) {
+        if !self.knowledge.is_enabled() { return; }
+        let res = async {
+            let (mut send, mut recv) = conn.open_bi().await?;
+            send.write_all(&[STREAM_KNOWLEDGE]).await?;
+
+            // Send SyncRequest
+            let req = crate::knowledge::KnowledgeMessage::SyncRequest;
+            let req_data = serde_json::to_vec(&req)?;
+            send.write_all(&(req_data.len() as u32).to_le_bytes()).await?;
+            send.write_all(&req_data).await?;
+
+            // Read their digest
+            let mut len_buf = [0u8; 4];
+            recv.read_exact(&mut len_buf).await?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len > 1_000_000 { anyhow::bail!("Knowledge sync response too large"); }
+            let mut buf = vec![0u8; len];
+            recv.read_exact(&mut buf).await?;
+            let their_msg: crate::knowledge::KnowledgeMessage = serde_json::from_slice(&buf)?;
+
+            if let crate::knowledge::KnowledgeMessage::SyncDigest(their_ids) = their_msg {
+                // Figure out what we're missing
+                let our_ids = self.knowledge.ids().await;
+                let missing: Vec<u64> = their_ids.iter()
+                    .filter(|id| !our_ids.contains(id))
+                    .cloned()
+                    .collect();
+
+                if !missing.is_empty() {
+                    // Request missing items
+                    let fetch = crate::knowledge::KnowledgeMessage::FetchRequest(missing);
+                    let fetch_data = serde_json::to_vec(&fetch)?;
+                    send.write_all(&(fetch_data.len() as u32).to_le_bytes()).await?;
+                    send.write_all(&fetch_data).await?;
+
+                    // Read their response
+                    let mut len_buf2 = [0u8; 4];
+                    recv.read_exact(&mut len_buf2).await?;
+                    let len2 = u32::from_le_bytes(len_buf2) as usize;
+                    if len2 > 10_000_000 { anyhow::bail!("Knowledge fetch response too large"); }
+                    let mut buf2 = vec![0u8; len2];
+                    recv.read_exact(&mut buf2).await?;
+                    let items_msg: crate::knowledge::KnowledgeMessage = serde_json::from_slice(&buf2)?;
+
+                    if let crate::knowledge::KnowledgeMessage::FetchResponse(items) = items_msg {
+                        let count = items.len();
+                        for item in items {
+                            self.knowledge.insert(item).await;
+                        }
+                        if count > 0 {
+                            tracing::info!("Knowledge sync: got {} items from {}", count, remote.fmt_short());
+                        }
+                    }
+                }
+            }
+
+            send.finish()?;
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if let Err(e) = res {
+            tracing::debug!("Knowledge sync with {} failed: {e}", remote.fmt_short());
+        }
+    }
+
+    /// Handle an inbound knowledge stream from a peer.
+    async fn handle_knowledge_stream(
+        &self,
+        remote: EndpointId,
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<()> {
+        // Read the message
+        let mut len_buf = [0u8; 4];
+        recv.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 10_000_000 { anyhow::bail!("Knowledge message too large"); }
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        let msg: crate::knowledge::KnowledgeMessage = serde_json::from_slice(&buf)?;
+
+        match msg {
+            crate::knowledge::KnowledgeMessage::Post(item) => {
+                // Insert and re-broadcast if new
+                let peer_name = item.from.clone();
+                if self.knowledge.insert(item.clone()).await {
+                    eprintln!("📝 Knowledge from {}: {}", peer_name,
+                        if item.text.len() > 80 { format!("{}...", &item.text[..80]) } else { item.text.clone() });
+                    // Forward to other peers (flood-fill)
+                    let data = serde_json::to_vec(&crate::knowledge::KnowledgeMessage::Post(item))?;
+                    let conns: Vec<(EndpointId, Connection)> = {
+                        let state = self.state.lock().await;
+                        state.connections.iter()
+                            .filter(|(id, _)| **id != remote)
+                            .map(|(id, c)| (*id, c.clone()))
+                            .collect()
+                    };
+                    for (peer_id, conn) in conns {
+                        let bytes = data.clone();
+                        tokio::spawn(async move {
+                            let res = async {
+                                let (mut send, _recv) = conn.open_bi().await?;
+                                send.write_all(&[STREAM_KNOWLEDGE]).await?;
+                                send.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+                                send.write_all(&bytes).await?;
+                                send.finish()?;
+                                Ok::<_, anyhow::Error>(())
+                            }.await;
+                            if let Err(e) = res {
+                                tracing::debug!("Failed to forward knowledge to {}: {e}", peer_id.fmt_short());
+                            }
+                        });
+                    }
+                }
+            }
+            crate::knowledge::KnowledgeMessage::SyncRequest => {
+                // Send our digest
+                let ids = self.knowledge.ids().await;
+                let digest = crate::knowledge::KnowledgeMessage::SyncDigest(ids);
+                let data = serde_json::to_vec(&digest)?;
+                send.write_all(&(data.len() as u32).to_le_bytes()).await?;
+                send.write_all(&data).await?;
+
+                // Check if they send a fetch request
+                let mut len_buf2 = [0u8; 4];
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    recv.read_exact(&mut len_buf2),
+                ).await {
+                    Ok(Ok(())) => {
+                        let len2 = u32::from_le_bytes(len_buf2) as usize;
+                        if len2 > 1_000_000 { anyhow::bail!("Fetch request too large"); }
+                        let mut buf2 = vec![0u8; len2];
+                        recv.read_exact(&mut buf2).await?;
+                        let fetch_msg: crate::knowledge::KnowledgeMessage = serde_json::from_slice(&buf2)?;
+                        if let crate::knowledge::KnowledgeMessage::FetchRequest(wanted_ids) = fetch_msg {
+                            let items = self.knowledge.get_by_ids(&wanted_ids).await;
+                            let resp = crate::knowledge::KnowledgeMessage::FetchResponse(items);
+                            let resp_data = serde_json::to_vec(&resp)?;
+                            send.write_all(&(resp_data.len() as u32).to_le_bytes()).await?;
+                            send.write_all(&resp_data).await?;
+                        }
+                    }
+                    _ => {} // No fetch request, that's fine
+                }
+                send.finish()?;
+            }
+            _ => {} // Unexpected message type
+        }
+
+        Ok(())
     }
 
     /// Get the mesh catalog: all models that any node has on disk or has requested.
@@ -1541,6 +1745,16 @@ impl Node {
                         }
                     });
                 }
+                STREAM_KNOWLEDGE => {
+                    if self.knowledge.is_enabled() {
+                        let node = self.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = node.handle_knowledge_stream(remote, send, recv).await {
+                                tracing::debug!("Knowledge stream error from {}: {e}", remote.fmt_short());
+                            }
+                        });
+                    }
+                }
                 other => {
                     tracing::warn!("Unknown stream type {other} from {}", remote.fmt_short());
                 }
@@ -1656,6 +1870,14 @@ impl Node {
                             tracing::debug!("Could not connect to discovered peer {}: {e}", ann.addr.id.fmt_short());
                         }
                     }
+                }
+            }
+
+            // Sync knowledge on initial connection
+            if self.knowledge.is_enabled() {
+                let conn = self.state.lock().await.connections.get(&remote).cloned();
+                if let Some(conn) = conn {
+                    self.sync_knowledge(conn, remote).await;
                 }
             }
         }

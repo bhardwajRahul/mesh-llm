@@ -1,6 +1,7 @@
 mod api;
 mod download;
 mod election;
+mod knowledge;
 mod launch;
 mod mesh;
 mod moe;
@@ -137,6 +138,10 @@ struct Cli {
     #[arg(long)]
     nostr_relay: Vec<String>,
 
+    /// Enable the knowledge whiteboard — share text messages across the mesh.
+    #[arg(long)]
+    knowledge: bool,
+
     /// Internal: set when this node joined via Nostr discovery (not --join).
     #[arg(skip)]
     nostr_discovery: bool,
@@ -204,6 +209,37 @@ enum Command {
         #[arg(long, default_value = "9337")]
         port: u16,
     },
+    /// Knowledge whiteboard — post, search, and read messages shared across the mesh.
+    ///
+    /// Post a message:  mesh-llm knowledge "your message here"
+    /// Show feed:       mesh-llm knowledge
+    /// Search:          mesh-llm knowledge --search "query"
+    /// From a peer:     mesh-llm knowledge --from tyler
+    /// Reply:           mesh-llm knowledge --reply <id> "response"
+    /// Show thread:     mesh-llm knowledge --thread <id>
+    #[command(name = "knowledge")]
+    Knowledge {
+        /// Message to post (if provided).
+        text: Option<String>,
+        /// Search the whiteboard.
+        #[arg(long)]
+        search: Option<String>,
+        /// Filter by author name.
+        #[arg(long)]
+        from: Option<String>,
+        /// Reply to an item by ID (prefix match).
+        #[arg(long)]
+        reply: Option<String>,
+        /// Show a thread starting from an item ID (prefix match).
+        #[arg(long)]
+        thread: Option<String>,
+        /// Max items to show (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Console/API port of the running mesh-llm instance.
+        #[arg(long, default_value = "3131")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -268,6 +304,9 @@ async fn main() -> Result<()> {
             }
             Command::Claude { model, port } => {
                 return run_claude(model.clone(), *port).await;
+            }
+            Command::Knowledge { text, search, from, reply, thread, limit, port } => {
+                return run_knowledge(text.clone(), search.clone(), from.clone(), reply.clone(), thread.clone(), *limit, *port).await;
             }
 
         }
@@ -799,6 +838,15 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let (node, channels) = mesh::Node::start(role, &cli.relay, cli.bind_port, max_vram).await?;
     node.start_accepting();
     let token = node.invite_token();
+
+    // Enable knowledge whiteboard if requested
+    if cli.knowledge {
+        node.knowledge.set_enabled(true);
+        if let Some(ref name) = cli.mesh_name {
+            node.set_knowledge_name(name.clone()).await;
+        }
+        eprintln!("📝 Knowledge whiteboard enabled");
+    }
 
     // Advertise what we have on disk and what we want the mesh to serve
     node.set_available_models(local_models.clone()).await;
@@ -2138,6 +2186,121 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
         let _ = c.wait();
     }
     Ok(())
+}
+
+async fn run_knowledge(
+    text: Option<String>,
+    search: Option<String>,
+    from: Option<String>,
+    reply: Option<String>,
+    thread: Option<String>,
+    limit: usize,
+    port: u16,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Show a thread
+    if let Some(id_prefix) = thread {
+        let resp = client.get(format!("{base}/api/knowledge/thread/{id_prefix}"))
+            .send().await
+            .context("Cannot reach mesh-llm — is it running with --knowledge?")?;
+        let items: Vec<knowledge::KnowledgeItem> = resp.json().await?;
+        if items.is_empty() {
+            eprintln!("No thread found for ID prefix '{id_prefix}'");
+        } else {
+            print_knowledge_items(&items);
+        }
+        return Ok(());
+    }
+
+    // Post a message (with optional reply)
+    if let Some(msg) = text {
+        // PII check
+        let issues = knowledge::pii_check(&msg);
+        if !issues.is_empty() {
+            eprintln!("⚠️  PII/secret issues detected:");
+            for issue in &issues {
+                eprintln!("   • {issue}");
+            }
+            eprintln!("Scrubbing and posting...");
+        }
+        let clean = knowledge::pii_scrub(&msg);
+
+        let mut body = serde_json::json!({ "text": clean });
+        if let Some(ref reply_id) = reply {
+            body["reply_to"] = serde_json::Value::String(reply_id.clone());
+        }
+        let resp = client.post(format!("{base}/api/knowledge/post"))
+            .json(&body)
+            .send().await
+            .context("Cannot reach mesh-llm — is it running with --knowledge?")?;
+        if resp.status().is_success() {
+            let item: knowledge::KnowledgeItem = resp.json().await?;
+            eprintln!("📝 Posted (id: {:x})", item.id);
+        } else {
+            let err = resp.text().await.unwrap_or_default();
+            eprintln!("Error: {err}");
+        }
+        return Ok(());
+    }
+
+    // Search
+    if let Some(q) = search {
+        let resp = client.get(format!("{base}/api/knowledge/search"))
+            .query(&[("q", q.as_str()), ("limit", &limit.to_string())])
+            .send().await
+            .context("Cannot reach mesh-llm — is it running with --knowledge?")?;
+        let items: Vec<knowledge::KnowledgeItem> = resp.json().await?;
+        if items.is_empty() {
+            eprintln!("No results.");
+        } else {
+            print_knowledge_items(&items);
+        }
+        return Ok(());
+    }
+
+    // Feed (optionally filtered by peer)
+    let mut params = vec![("limit", limit.to_string())];
+    if let Some(ref f) = from {
+        params.push(("from", f.clone()));
+    }
+    let resp = client.get(format!("{base}/api/knowledge/feed"))
+        .query(&params)
+        .send().await
+        .context("Cannot reach mesh-llm — is it running with --knowledge?")?;
+    let items: Vec<knowledge::KnowledgeItem> = resp.json().await?;
+    if items.is_empty() {
+        eprintln!("Whiteboard is empty.");
+    } else {
+        print_knowledge_items(&items);
+    }
+    Ok(())
+}
+
+fn print_knowledge_items(items: &[knowledge::KnowledgeItem]) {
+    for item in items {
+        let time = chrono_format(item.timestamp);
+        let reply_marker = if item.reply_to.is_some() { " ↩" } else { "" };
+        println!("{:x} │ {} │ {}{}", item.id, time, item.from, reply_marker);
+        // Indent the text
+        for line in item.text.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
+}
+
+fn chrono_format(ts: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let ago = now.saturating_sub(ts);
+    if ago < 60 { format!("{ago}s ago") }
+    else if ago < 3600 { format!("{}m ago", ago / 60) }
+    else if ago < 86400 { format!("{}h ago", ago / 3600) }
+    else { format!("{}d ago", ago / 86400) }
 }
 
 async fn check_for_update() {
