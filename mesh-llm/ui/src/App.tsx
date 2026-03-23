@@ -2940,6 +2940,37 @@ function layoutTopologyNodes(
   return positioned;
 }
 
+// Mermaid diagram renderer — loads mermaid from CDN on first use
+const mermaidPromise = import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs' as string).then(m => {
+  m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  return m.default;
+}).catch(() => null);
+
+function MermaidBlock({ code }: { code: string }) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [svg, setSvg] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    mermaidPromise.then(async (mermaid) => {
+      if (cancelled || !mermaid) { setError('Mermaid failed to load'); return; }
+      try {
+        const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const { svg: rendered } = await mermaid.render(id, code);
+        if (!cancelled) setSvg(rendered);
+      } catch (e: unknown) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Render failed');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [code]);
+
+  if (error) return <pre className="my-2 rounded-lg border border-border/70 bg-background/80 p-3 text-xs text-muted-foreground"><code>{code}</code></pre>;
+  if (!svg) return <div className="my-2 flex items-center gap-2 rounded-lg border border-border/70 bg-background/80 p-3 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />Rendering diagram…</div>;
+  return <div ref={containerRef} className="my-2 overflow-x-auto rounded-lg border border-border/70 bg-background/80 p-3 [&_svg]:max-w-full" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
 function MarkdownMessage({ content }: { content: string }) {
   return (
     <div
@@ -2962,7 +2993,20 @@ function MarkdownMessage({ content }: { content: string }) {
         '[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5',
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        components={{
+          code({ className, children, ...props }) {
+            const match = /language-mermaid/.exec(className || '');
+            if (match) {
+              const code = String(children).replace(/\n$/, '');
+              return <MermaidBlock code={code} />;
+            }
+            return <code className={className} {...props}>{children}</code>;
+          },
+        }}
+      >
         {content}
       </ReactMarkdown>
     </div>
