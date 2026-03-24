@@ -567,7 +567,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("GET", "/api/blackboard/feed") => {
             let node = state.inner.lock().await.node.clone();
             if !node.blackboard.is_enabled() {
-                respond_error(&mut stream, 404, "Blackboard not enabled (start with --blackboard)").await?;
+                respond_error(&mut stream, 404, "Blackboard not enabled. On public meshes (--auto), add --blackboard explicitly").await?;
             } else {
                 let query_str = path.split('?').nth(1).unwrap_or("");
                 let params: Vec<(&str, &str)> = query_str.split('&')
@@ -595,7 +595,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("GET", "/api/blackboard/search") => {
             let node = state.inner.lock().await.node.clone();
             if !node.blackboard.is_enabled() {
-                respond_error(&mut stream, 404, "Blackboard not enabled (start with --blackboard)").await?;
+                respond_error(&mut stream, 404, "Blackboard not enabled. On public meshes (--auto), add --blackboard explicitly").await?;
             } else {
                 let query_str = path.split('?').nth(1).unwrap_or("");
                 let params: Vec<(&str, &str)> = query_str.split('&')
@@ -621,7 +621,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("POST", "/api/blackboard/post") => {
             let node = state.inner.lock().await.node.clone();
             if !node.blackboard.is_enabled() {
-                respond_error(&mut stream, 404, "Blackboard not enabled (start with --blackboard)").await?;
+                respond_error(&mut stream, 404, "Blackboard not enabled. On public meshes (--auto), add --blackboard explicitly").await?;
             } else {
                 // Parse JSON body
                 let body = req.split("\r\n\r\n").nth(1).unwrap_or("");

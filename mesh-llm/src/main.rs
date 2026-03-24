@@ -72,7 +72,7 @@ struct Cli {
     #[arg(long)]
     region: Option<String>,
 
-    /// Enable the blackboard for sharing context across agents.
+    /// Enable blackboard on public meshes (on by default for private meshes).
     #[arg(long)]
     blackboard: bool,
 
@@ -870,12 +870,18 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     node.start_accepting();
     let token = node.invite_token();
 
-    // Enable blackboard if requested
-    if cli.blackboard {
-        if cli.nostr_discovery {
+    // Blackboard: on by default, off on public meshes (--auto) unless explicitly requested
+    let enable_blackboard = if cli.nostr_discovery {
+        if cli.blackboard {
             eprintln!("⚠️  Blackboard on a public mesh — your posts are visible to all peers.");
-            eprintln!("   For private use, join with --join <token> instead of --auto.");
+            true
+        } else {
+            false
         }
+    } else {
+        true
+    };
+    if enable_blackboard {
         node.blackboard.set_enabled(true);
         let display_name = cli.name.clone()
             .or_else(|| std::env::var("USER").ok())
@@ -2276,7 +2282,9 @@ async fn run_blackboard(
     let feed_check = client.get(format!("{base}/api/blackboard/feed?limit=1")).send().await;
     if let Ok(resp) = feed_check {
         if resp.status().as_u16() == 404 {
-            eprintln!("Mesh is running but blackboard is not enabled. Restart with --blackboard.");
+            eprintln!("Mesh is running but blackboard is not enabled.");
+            eprintln!("Blackboard is on by default for private meshes (--join).");
+            eprintln!("On public meshes (--auto), add --blackboard explicitly.");
             std::process::exit(1);
         }
     }
