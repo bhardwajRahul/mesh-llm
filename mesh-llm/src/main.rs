@@ -21,131 +21,122 @@ use std::path::PathBuf;
 pub const VERSION: &str = "0.42.0";
 
 #[derive(Parser, Debug)]
-#[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
+#[command(name = "mesh-llm", version = VERSION,
+    about = "Pool GPUs over the internet for LLM inference",
+    after_help = "Run with --help-advanced for all options.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Join an existing mesh via an invite token.
-    /// Can be specified multiple times — only one needs to be reachable.
+    /// Show all options (including advanced/niche ones).
+    #[arg(long, hide = true)]
+    help_advanced: bool,
+
+    /// Join a mesh via invite token (can repeat).
     #[arg(long, short)]
     join: Vec<String>,
 
-    /// Discover a mesh from Nostr and join it automatically.
-    /// Optionally specify a model name to filter by.
+    /// Discover a mesh via Nostr and join it.
     #[arg(long, default_missing_value = "", num_args = 0..=1)]
     discover: Option<String>,
 
-    /// Auto-join: discover a mesh via Nostr and join it.
-    /// Equivalent to: mesh-llm --join $(mesh-llm discover --auto)
+    /// Auto-join the best mesh found via Nostr.
     #[arg(long)]
     auto: bool,
 
-    /// GGUF model(s) for this mesh. Can be a path, catalog name, or HuggingFace URL.
-    /// First model is served by this node; additional models are wanted by the mesh
-    /// (other nodes joining will pick them up if they have them on disk).
-    /// When joining without --model, the mesh assigns one automatically.
+    /// Model to serve (path, catalog name, or HuggingFace URL).
     #[arg(long)]
     model: Vec<PathBuf>,
 
-    /// Local HTTP port for the API (default: 9337).
-    /// The elected host runs llama-server here; workers proxy to the host.
+    /// API port (default: 9337).
     #[arg(long, default_value = "9337")]
     port: u16,
 
-    /// Path to directory containing rpc-server and llama-server binaries.
-    /// Defaults to the same directory as the mesh-llm binary itself.
-    #[arg(long)]
-    bin_dir: Option<PathBuf>,
-
-    /// Device for rpc-server (e.g. MTL0, CPU). Default: auto-detect.
-    #[arg(long)]
-    device: Option<String>,
-
-    /// Tensor split ratios for llama-server (e.g. "0.8,0.2").
-    /// Without this, split is auto-calculated from VRAM.
-    #[arg(long)]
-    tensor_split: Option<String>,
-
-    /// Run as a lite client — no GPU, no rpc-server, no model needed.
+    /// Run as a client — no GPU, no model needed.
     #[arg(long)]
     client: bool,
-
-    /// Path to a draft model for speculative decoding (e.g. a small quant of the same model).
-    /// Only used on the host — the draft model runs locally, not distributed.
-    /// If omitted, auto-detected from catalog when the main model has a known draft pairing.
-    #[arg(long)]
-    draft: Option<PathBuf>,
-
-    /// Max draft tokens for speculative decoding (default: 8).
-    #[arg(long, default_value = "8")]
-    draft_max: u16,
-
-    /// Disable automatic draft model detection from catalog.
-    #[arg(long)]
-    no_draft: bool,
-
-    /// Force tensor split across all GPU nodes even if the model fits on the host.
-    /// Without this, the host loads solo when it has enough VRAM.
-    #[arg(long)]
-    split: bool,
-
-    /// Limit VRAM advertised to the mesh (in GB). Other nodes will see this
-    /// instead of your actual VRAM, capping how much work gets split to you.
-    #[arg(long)]
-    max_vram: Option<f64>,
-
-    /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
-    /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
-    #[arg(long)]
-    relay: Vec<String>,
-
-    /// Bind QUIC to a fixed UDP port (for NAT port forwarding).
-    #[arg(long)]
-    bind_port: Option<u16>,
 
     /// Web console port (default: 3131).
     #[arg(long, default_value = "3131")]
     console: u16,
 
-    /// Ignored (kept for backward compatibility).
-    #[arg(long, hide = true)]
-    no_console: bool,
-
-    /// Bind API and console to 0.0.0.0 instead of 127.0.0.1.
-    /// Use for containers (Docker, Fly.io) where external access is needed.
-    #[arg(long)]
-    listen_all: bool,
-
-    /// Publish this mesh to Nostr for discovery by others.
-    /// Republishes every 60s so the listing stays fresh.
+    /// Publish this mesh for discovery by others.
     #[arg(long)]
     publish: bool,
 
-    /// Human-readable name for this mesh (shown in discovery).
+    /// Name for this mesh (shown in discovery).
     #[arg(long)]
     mesh_name: Option<String>,
 
-    /// Geographic region tag (e.g. "US", "EU", "AU"). Shown in discovery.
+    /// Region tag, e.g. "US", "EU", "AU" (shown in discovery).
     #[arg(long)]
     region: Option<String>,
 
-    /// Stop advertising on Nostr when this many clients are connected.
-    /// Re-publishes when clients drop below the cap. No cap by default.
-    #[arg(long)]
-    max_clients: Option<usize>,
-
-    /// Nostr relay URLs for publishing/discovery (default: damus, nos.lol, nostr.band).
-    #[arg(long)]
-    nostr_relay: Vec<String>,
-
-    /// Enable the blackboard — agents share status, findings, and questions across the mesh. Works on any node (with or without a model).
+    /// Enable the blackboard for sharing context across agents.
     #[arg(long)]
     blackboard: bool,
 
-    /// Your display name on the blackboard (default: short node ID).
+    /// Your display name on the blackboard.
     #[arg(long)]
     name: Option<String>,
+
+    // ── Advanced options (hidden from default --help) ─────────────
+
+    /// Draft model for speculative decoding.
+    #[arg(long, hide = true)]
+    draft: Option<PathBuf>,
+
+    /// Max draft tokens (default: 8).
+    #[arg(long, default_value = "8", hide = true)]
+    draft_max: u16,
+
+    /// Disable automatic draft model detection.
+    #[arg(long, hide = true)]
+    no_draft: bool,
+
+    /// Force tensor split even if the model fits on one node.
+    #[arg(long, hide = true)]
+    split: bool,
+
+    /// Limit VRAM advertised to the mesh (GB).
+    #[arg(long, hide = true)]
+    max_vram: Option<f64>,
+
+    /// Path to rpc-server and llama-server binaries.
+    #[arg(long, hide = true)]
+    bin_dir: Option<PathBuf>,
+
+    /// Device for rpc-server (e.g. MTL0, CPU).
+    #[arg(long, hide = true)]
+    device: Option<String>,
+
+    /// Tensor split ratios for llama-server (e.g. "0.8,0.2").
+    #[arg(long, hide = true)]
+    tensor_split: Option<String>,
+
+    /// Override iroh relay URLs.
+    #[arg(long, hide = true)]
+    relay: Vec<String>,
+
+    /// Bind QUIC to a fixed UDP port (for NAT port forwarding).
+    #[arg(long, hide = true)]
+    bind_port: Option<u16>,
+
+    /// Bind to 0.0.0.0 (for containers/Fly.io).
+    #[arg(long, hide = true)]
+    listen_all: bool,
+
+    /// Stop advertising when N clients connected.
+    #[arg(long, hide = true)]
+    max_clients: Option<usize>,
+
+    /// Custom Nostr relay URLs.
+    #[arg(long, hide = true)]
+    nostr_relay: Vec<String>,
+
+    /// Ignored (backward compat).
+    #[arg(long, hide = true)]
+    no_console: bool,
 
     /// Internal: set when this node joined via Nostr discovery (not --join).
     #[arg(skip)]
@@ -162,7 +153,8 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
-    /// Drop a model from the mesh — stops all nodes serving it
+    /// Drop a model from the mesh.
+    #[command(hide = true)]
     Drop {
         /// Model name to drop
         name: String,
@@ -170,7 +162,7 @@ enum Command {
         #[arg(long, default_value = "9337")]
         port: u16,
     },
-    /// Discover meshes published to Nostr and optionally auto-join one
+    /// Discover meshes on Nostr and optionally auto-join one.
     Discover {
         /// Filter by model name (substring match)
         #[arg(long)]
@@ -188,7 +180,8 @@ enum Command {
         #[arg(long)]
         relay: Vec<String>,
     },
-    /// Rotate the Nostr identity key (forces new keypair on next --publish)
+    /// Rotate the Nostr identity key.
+    #[command(hide = true)]
     RotateKey,
     /// Launch Goose with mesh-llm as the inference provider.
     ///
@@ -263,6 +256,25 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+
+    // --help-advanced: print full help with all hidden options and commands visible
+    if std::env::args().any(|a| a == "--help-advanced") {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        // Unhide all arguments
+        let args: Vec<clap::Id> = cmd.get_arguments().map(|a| a.get_id().clone()).collect();
+        for id in args {
+            cmd = cmd.mut_arg(id, |a| a.hide(false));
+        }
+        // Unhide all subcommands
+        let sub_names: Vec<String> = cmd.get_subcommands().map(|s| s.get_name().to_string()).collect();
+        for name in sub_names {
+            cmd = cmd.mut_subcommand(name, |s| s.hide(false));
+        }
+        cmd.print_help().ok();
+        eprintln!();
+        std::process::exit(0);
+    }
 
     let mut cli = Cli::parse();
 
