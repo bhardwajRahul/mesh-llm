@@ -289,7 +289,8 @@ pub async fn publish_loop(
         // Then try merging with any other mesh (different mesh, unnamed only).
         // Only merge into meshes strictly larger than us to avoid two solo nodes
         // endlessly unpublishing and trying to join each other.
-        let gpu_peers = peers.iter()
+        let gpu_peers = peers
+            .iter()
             .filter(|p| !matches!(p.role, crate::mesh::NodeRole::Client))
             .count();
         let my_node_count = gpu_peers + 1; // peers + self
@@ -323,10 +324,12 @@ pub async fn publish_loop(
                 };
 
                 if let Some(target) = split_target.or(merge_target) {
-                    eprintln!("📡 Found larger mesh '{}' ({} nodes vs our {}) — rejoining",
+                    eprintln!(
+                        "📡 Found larger mesh '{}' ({} nodes vs our {}) — rejoining",
                         target.listing.name.as_deref().unwrap_or("unnamed"),
                         target.listing.node_count,
-                        my_node_count);
+                        my_node_count
+                    );
                     if let Err(e) = publisher.unpublish().await {
                         tracing::warn!("Failed to unpublish solo listing: {e}");
                     }
@@ -732,7 +735,9 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
 #[derive(Debug)]
 pub enum AutoDecision {
     /// Ranked list of meshes to try joining (best first)
-    Join { candidates: Vec<(String, DiscoveredMesh)> },
+    Join {
+        candidates: Vec<(String, DiscoveredMesh)>,
+    },
     /// No suitable mesh found — start a new one with these models
     StartNew { models: Vec<String> },
 }
@@ -782,7 +787,8 @@ pub fn smart_auto(
     // If the user specified --mesh-name, take all candidates (they already
     // filtered by name above — the user explicitly asked for this mesh).
     // Otherwise, require positive score to filter out stale/private meshes.
-    let viable: Vec<(String, DiscoveredMesh)> = scored.iter()
+    let viable: Vec<(String, DiscoveredMesh)> = scored
+        .iter()
         .filter(|(_, score)| target_name.is_some() || *score > 0)
         .map(|(m, _)| (m.listing.invite_token.clone(), (*m).clone()))
         .collect();
@@ -841,7 +847,11 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
     let on_disk = |name: &str| local_models.contains(&name.to_string());
     // Helper: model size from tiers
     let size_of = |name: &str| -> f64 {
-        tiers.iter().find(|(n, _)| *n == name).map(|(_, s)| *s).unwrap_or(f64::MAX)
+        tiers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, s)| *s)
+            .unwrap_or(f64::MAX)
     };
     let fits = |name: &str, budget: f64| -> bool { size_of(name) <= budget };
 
@@ -857,14 +867,45 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
         // Sizes: MiniMax=138G, 72B=47G, Coder-32B=20G, 32B=20G, 30B-A3B=17.3G,
         //        GLM-Flash=18G, 14B=9G, Qwen3-8B=5G, Coder-7B=4.4G
         // With 1.1× tier multiplier and 0.85× usable VRAM.
-        Pack { min_vram: 165.0, models: &["MiniMax-M2.5-Q4_K_M"] },
-        Pack { min_vram: 85.0,  models: &["Qwen2.5-72B-Instruct-Q4_K_M", "Qwen2.5-Coder-32B-Instruct-Q4_K_M"] },
-        Pack { min_vram: 58.0,  models: &["Qwen2.5-72B-Instruct-Q4_K_M"] },
-        Pack { min_vram: 55.0,  models: &["Qwen2.5-32B-Instruct-Q4_K_M", "Qwen3-30B-A3B-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"] },
-        Pack { min_vram: 28.0,  models: &["Qwen3-30B-A3B-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"] },
-        Pack { min_vram: 22.0,  models: &["GLM-4.7-Flash-Q4_K_M"] },
-        Pack { min_vram: 13.0,  models: &["Qwen3-8B-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"] },
-        Pack { min_vram: 0.0,   models: &["Qwen3-8B-Q4_K_M"] },
+        Pack {
+            min_vram: 165.0,
+            models: &["MiniMax-M2.5-Q4_K_M"],
+        },
+        Pack {
+            min_vram: 85.0,
+            models: &[
+                "Qwen2.5-72B-Instruct-Q4_K_M",
+                "Qwen2.5-Coder-32B-Instruct-Q4_K_M",
+            ],
+        },
+        Pack {
+            min_vram: 58.0,
+            models: &["Qwen2.5-72B-Instruct-Q4_K_M"],
+        },
+        Pack {
+            min_vram: 55.0,
+            models: &[
+                "Qwen2.5-32B-Instruct-Q4_K_M",
+                "Qwen3-30B-A3B-Q4_K_M",
+                "Qwen2.5-Coder-7B-Instruct-Q4_K_M",
+            ],
+        },
+        Pack {
+            min_vram: 28.0,
+            models: &["Qwen3-30B-A3B-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"],
+        },
+        Pack {
+            min_vram: 22.0,
+            models: &["GLM-4.7-Flash-Q4_K_M"],
+        },
+        Pack {
+            min_vram: 13.0,
+            models: &["Qwen3-8B-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"],
+        },
+        Pack {
+            min_vram: 0.0,
+            models: &["Qwen3-8B-Q4_K_M"],
+        },
     ];
 
     // Find the best pack that fits
@@ -880,17 +921,23 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
     }
 
     // Fallback: find the largest single model that fits, prefer on-disk
-    let on_disk_fit = tiers.iter()
+    let on_disk_fit = tiers
+        .iter()
         .find(|(name, min_vram)| *min_vram <= usable && on_disk(name));
     let any_fit = tiers.iter().find(|(_, min_vram)| *min_vram <= usable);
 
-    let primary = on_disk_fit.or(any_fit)
+    let primary = on_disk_fit
+        .or(any_fit)
         .map(|(name, _)| name.to_string())
         .unwrap_or_else(|| "Qwen2.5-3B-Instruct-Q4_K_M".into());
 
     // Try to add a code specialist if there's room
     let remaining = usable - size_of(&primary);
-    let coders = ["Qwen2.5-Coder-32B-Instruct-Q4_K_M", "Qwen2.5-Coder-14B-Instruct-Q4_K_M", "Qwen2.5-Coder-7B-Instruct-Q4_K_M"];
+    let coders = [
+        "Qwen2.5-Coder-32B-Instruct-Q4_K_M",
+        "Qwen2.5-Coder-14B-Instruct-Q4_K_M",
+        "Qwen2.5-Coder-7B-Instruct-Q4_K_M",
+    ];
     for coder in coders {
         if coder != primary && fits(coder, remaining) {
             return vec![primary, coder.to_string()];
