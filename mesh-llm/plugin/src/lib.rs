@@ -13,7 +13,7 @@ mod runtime;
 
 pub use async_trait::async_trait;
 pub use context::PluginContext;
-pub use error::{PluginError, PluginResult, PluginRpcResult};
+pub use error::{PluginError, PluginResult, PluginRpcResult, STARTUP_DISABLED_ERROR_CODE};
 pub use helpers::{
     accept_bulk_transfer_message, bulk_transfer_message, bulk_transfer_sequence,
     cancel_task_result, channel_message, complete_result, empty_object_schema, get_prompt_result,
@@ -32,7 +32,10 @@ pub use io::{
     connect_from_env, read_envelope, send_bulk_transfer_message, send_channel_message,
     write_envelope, LocalStream,
 };
-pub use runtime::{MeshVisibility, Plugin, PluginMetadata, PluginRuntime, SimplePlugin};
+pub use runtime::{
+    MeshVisibility, Plugin, PluginInitializeRequest, PluginMetadata, PluginRuntime,
+    PluginStartupPolicy, SimplePlugin,
+};
 
 #[allow(dead_code)]
 pub mod proto {

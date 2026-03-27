@@ -1051,7 +1051,6 @@ fn plugin_host_mode(cli: &Cli) -> plugin::PluginHostMode {
         } else {
             mesh_llm_plugin::MeshVisibility::Private
         },
-        blackboard_in_public_meshes: cli.blackboard,
     }
 }
 
@@ -1128,7 +1127,9 @@ async fn run_plugin_mcp(cli: &Cli) -> Result<()> {
     join_mesh_for_mcp(cli, &node).await?;
 
     let (plugin_mesh_tx, plugin_mesh_rx) = tokio::sync::mpsc::channel(256);
-    let plugin_manager = plugin::PluginManager::start(&resolved_plugins, plugin_mesh_tx).await?;
+    let plugin_manager =
+        plugin::PluginManager::start(&resolved_plugins, plugin_host_mode(&cli), plugin_mesh_tx)
+            .await?;
     node.set_plugin_manager(plugin_manager.clone()).await;
     node.start_plugin_channel_forwarder(plugin_mesh_rx);
 
@@ -1180,7 +1181,9 @@ async fn run_auto(
     node.set_blackboard_name(blackboard_display_name(&cli, &node))
         .await;
     let (plugin_mesh_tx, plugin_mesh_rx) = tokio::sync::mpsc::channel(256);
-    let plugin_manager = plugin::PluginManager::start(&resolved_plugins, plugin_mesh_tx).await?;
+    let plugin_manager =
+        plugin::PluginManager::start(&resolved_plugins, plugin_host_mode(&cli), plugin_mesh_tx)
+            .await?;
     node.set_plugin_manager(plugin_manager.clone()).await;
     node.start_plugin_channel_forwarder(plugin_mesh_rx);
 
@@ -1730,7 +1733,9 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     node.set_blackboard_name(blackboard_display_name(&cli, &node))
         .await;
     let (plugin_mesh_tx, plugin_mesh_rx) = tokio::sync::mpsc::channel(256);
-    let plugin_manager = plugin::PluginManager::start(&resolved_plugins, plugin_mesh_tx).await?;
+    let plugin_manager =
+        plugin::PluginManager::start(&resolved_plugins, plugin_host_mode(&cli), plugin_mesh_tx)
+            .await?;
     node.set_plugin_manager(plugin_manager.clone()).await;
     node.start_plugin_channel_forwarder(plugin_mesh_rx);
 

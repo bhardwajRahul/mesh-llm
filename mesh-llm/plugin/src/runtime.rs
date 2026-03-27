@@ -32,12 +32,50 @@ pub enum MeshVisibility {
     Public,
 }
 
+impl MeshVisibility {
+    fn from_proto(value: i32) -> Self {
+        match proto::MeshVisibility::try_from(value).unwrap_or(proto::MeshVisibility::Unspecified) {
+            proto::MeshVisibility::Public => Self::Public,
+            _ => Self::Private,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginStartupPolicy {
+    #[default]
+    Any,
+    PrivateMeshOnly,
+    PublicMeshOnly,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PluginInitializeRequest {
+    pub host_protocol_version: u32,
+    pub host_version: String,
+    pub host_info_json: String,
+    pub mesh_visibility: MeshVisibility,
+}
+
+impl From<proto::InitializeRequest> for PluginInitializeRequest {
+    fn from(value: proto::InitializeRequest) -> Self {
+        Self {
+            host_protocol_version: value.host_protocol_version,
+            host_version: value.host_version,
+            host_info_json: value.host_info_json,
+            mesh_visibility: MeshVisibility::from_proto(value.mesh_visibility),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PluginMetadata {
     plugin_id: String,
     plugin_version: String,
     server_info: ServerInfo,
     capabilities: Vec<String>,
+    startup_policy: PluginStartupPolicy,
 }
 
 impl PluginMetadata {
@@ -51,6 +89,7 @@ impl PluginMetadata {
             plugin_version: plugin_version.into(),
             server_info,
             capabilities: Vec::new(),
+            startup_policy: PluginStartupPolicy::Any,
         }
     }
 
@@ -58,13 +97,27 @@ impl PluginMetadata {
         self.capabilities = capabilities;
         self
     }
+
+    pub fn with_startup_policy(mut self, startup_policy: PluginStartupPolicy) -> Self {
+        self.startup_policy = startup_policy;
+        self
+    }
 }
 
+type InitializeFuture<'a> = Pin<Box<dyn Future<Output = PluginResult<()>> + Send + 'a>>;
 type InitFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 type HealthFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 type SubscribeFuture<'a> = Pin<Box<dyn Future<Output = PluginResult<()>> + Send + 'a>>;
 type SetLogLevelFuture<'a> = Pin<Box<dyn Future<Output = PluginResult<()>> + Send + 'a>>;
 
+type InitializeHandler = Arc<
+    dyn for<'a, 'ctx> Fn(
+            PluginInitializeRequest,
+            &'a mut PluginContext<'ctx>,
+        ) -> InitializeFuture<'a>
+        + Send
+        + Sync,
+>;
 type InitHandler =
     Arc<dyn for<'a, 'ctx> Fn(&'a mut PluginContext<'ctx>) -> InitFuture<'a> + Send + Sync>;
 type HealthHandler =
@@ -114,6 +167,14 @@ pub trait Plugin: Send {
 
     fn capabilities(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    async fn initialize(
+        &mut self,
+        _request: PluginInitializeRequest,
+        _context: &mut PluginContext<'_>,
+    ) -> PluginResult<()> {
+        Ok(())
     }
 
     async fn on_initialized(&mut self, _context: &mut PluginContext<'_>) -> Result<()> {
@@ -436,6 +497,7 @@ pub struct SimplePlugin {
     resource_router: Option<ResourceRouter>,
     completion_router: Option<CompletionRouter>,
     task_router: Option<TaskRouter>,
+    initialize_handler: Option<InitializeHandler>,
     on_initialized: Option<InitHandler>,
     health_handler: Option<HealthHandler>,
     subscribe_handler: Option<SubscribeHandler>,
@@ -455,6 +517,7 @@ impl SimplePlugin {
             resource_router: None,
             completion_router: None,
             task_router: None,
+            initialize_handler: None,
             on_initialized: None,
             health_handler: None,
             subscribe_handler: None,
@@ -488,6 +551,20 @@ impl SimplePlugin {
 
     pub fn with_task_router(mut self, router: TaskRouter) -> Self {
         self.task_router = Some(router);
+        self
+    }
+
+    pub fn on_initialize<F>(mut self, handler: F) -> Self
+    where
+        F: for<'a, 'ctx> Fn(
+                PluginInitializeRequest,
+                &'a mut PluginContext<'ctx>,
+            ) -> InitializeFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.initialize_handler = Some(Arc::new(handler));
         self
     }
 
@@ -605,6 +682,37 @@ impl Plugin for SimplePlugin {
 
     fn capabilities(&self) -> Vec<String> {
         self.metadata.capabilities.clone()
+    }
+
+    async fn initialize(
+        &mut self,
+        request: PluginInitializeRequest,
+        context: &mut PluginContext<'_>,
+    ) -> PluginResult<()> {
+        match self.metadata.startup_policy {
+            PluginStartupPolicy::Any => {}
+            PluginStartupPolicy::PrivateMeshOnly
+                if request.mesh_visibility != MeshVisibility::Private =>
+            {
+                return Err(PluginError::startup_disabled(format!(
+                    "Plugin '{}' requires a private mesh",
+                    self.metadata.plugin_id
+                )));
+            }
+            PluginStartupPolicy::PublicMeshOnly
+                if request.mesh_visibility != MeshVisibility::Public =>
+            {
+                return Err(PluginError::startup_disabled(format!(
+                    "Plugin '{}' requires a public mesh",
+                    self.metadata.plugin_id
+                )));
+            }
+            PluginStartupPolicy::PrivateMeshOnly | PluginStartupPolicy::PublicMeshOnly => {}
+        }
+        match &self.initialize_handler {
+            Some(handler) => handler(request, context).await,
+            None => Ok(()),
+        }
     }
 
     async fn on_initialized(&mut self, context: &mut PluginContext<'_>) -> Result<()> {
@@ -834,7 +942,28 @@ impl PluginRuntime {
             let plugin_id = plugin.plugin_id().to_string();
 
             match envelope.payload {
-                Some(proto::envelope::Payload::InitializeRequest(_)) => {
+                Some(proto::envelope::Payload::InitializeRequest(request)) => {
+                    let init_result = {
+                        let mut context = PluginContext {
+                            stream: &mut stream,
+                            plugin_id: &plugin_id,
+                        };
+                        plugin
+                            .initialize(PluginInitializeRequest::from(request), &mut context)
+                            .await
+                    };
+                    if let Err(err) = init_result {
+                        let response = proto::Envelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            plugin_id: plugin_id.clone(),
+                            request_id,
+                            payload: Some(proto::envelope::Payload::ErrorResponse(
+                                err.into_error_response(),
+                            )),
+                        };
+                        write_envelope(&mut stream, &response).await?;
+                        break;
+                    }
                     let response = proto::Envelope {
                         protocol_version: PROTOCOL_VERSION,
                         plugin_id: plugin_id.clone(),

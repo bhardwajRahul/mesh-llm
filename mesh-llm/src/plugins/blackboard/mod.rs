@@ -7,7 +7,7 @@ pub mod mcp;
 
 use anyhow::Result;
 use mesh_llm_plugin::{
-    json_schema_tool, plugin_server_info, MeshVisibility, PluginMetadata, PluginRuntime,
+    json_schema_tool, plugin_server_info, PluginMetadata, PluginRuntime, PluginStartupPolicy,
     SimplePlugin, ToolRouter,
 };
 use schemars::JsonSchema;
@@ -16,16 +16,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub const BLACKBOARD_CHANNEL: &str = "blackboard.v1";
-
-pub(crate) fn should_launch(
-    mesh_visibility: MeshVisibility,
-    enable_in_public_meshes: bool,
-) -> bool {
-    match mesh_visibility {
-        MeshVisibility::Private => true,
-        MeshVisibility::Public => enable_in_public_meshes,
-    }
-}
 
 /// Max items to keep in memory.
 const MAX_ITEMS: usize = 500;
@@ -387,7 +377,8 @@ fn build_blackboard_plugin(name: String) -> SimplePlugin {
                 ),
             ),
         )
-        .with_capabilities(vec!["channel:blackboard".into()]),
+        .with_capabilities(vec!["channel:blackboard".into()])
+        .with_startup_policy(PluginStartupPolicy::PrivateMeshOnly),
     )
     .with_tool_router(tool_router(store))
     .with_health(move |_context| {

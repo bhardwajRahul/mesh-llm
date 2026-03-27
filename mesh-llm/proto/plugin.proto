@@ -26,10 +26,17 @@ message Envelope {
 
 message Empty {}
 
+enum MeshVisibility {
+  MESH_VISIBILITY_UNSPECIFIED = 0;
+  PRIVATE = 1;
+  PUBLIC = 2;
+}
+
 message InitializeRequest {
   uint32 host_protocol_version = 1;
   string host_version = 2;
   string host_info_json = 3;
+  MeshVisibility mesh_visibility = 4;
 }
 
 message InitializeResponse {

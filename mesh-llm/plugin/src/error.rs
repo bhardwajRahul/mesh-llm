@@ -2,6 +2,8 @@ use rmcp::model::ErrorCode;
 
 use crate::proto;
 
+pub const STARTUP_DISABLED_ERROR_CODE: i32 = -32_010;
+
 #[derive(Debug, Clone)]
 pub struct PluginError {
     pub code: i32,
@@ -39,6 +41,14 @@ impl PluginError {
             code: ErrorCode::INTERNAL_ERROR.0,
             message: message.into(),
             data_json: String::new(),
+        }
+    }
+
+    pub fn startup_disabled(message: impl Into<String>) -> Self {
+        Self {
+            code: STARTUP_DISABLED_ERROR_CODE,
+            message: message.into(),
+            data_json: serde_json::json!({ "status": "disabled" }).to_string(),
         }
     }
 

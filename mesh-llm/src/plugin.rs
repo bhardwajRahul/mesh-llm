@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 pub use mesh_llm_plugin::proto;
-use mesh_llm_plugin::MeshVisibility;
+use mesh_llm_plugin::{MeshVisibility, STARTUP_DISABLED_ERROR_CODE};
 use prost::Message;
 use rmcp::model::{
     CallToolResult as McpCallToolResult, ErrorCode, InitializeRequestParams, ListToolsResult,
@@ -56,7 +56,6 @@ pub struct ExternalPluginSpec {
 #[derive(Clone, Copy, Debug)]
 pub struct PluginHostMode {
     pub mesh_visibility: MeshVisibility,
-    pub blackboard_in_public_meshes: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +139,7 @@ struct PluginManagerInner {
 
 struct ExternalPlugin {
     spec: ExternalPluginSpec,
+    host_mode: PluginHostMode,
     summary: Arc<Mutex<PluginSummary>>,
     server_info: Arc<Mutex<Option<ServerInfo>>>,
     runtime: Arc<Mutex<Option<PluginRuntime>>>,
@@ -192,9 +192,9 @@ pub fn load_config(override_path: Option<&Path>) -> Result<MeshConfig> {
     toml::from_str(&raw).with_context(|| format!("Failed to parse config {}", path.display()))
 }
 
-pub fn resolve_plugins(config: &MeshConfig, host_mode: PluginHostMode) -> Result<ResolvedPlugins> {
+pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Result<ResolvedPlugins> {
     let mut externals = Vec::new();
-    let mut inactive = Vec::new();
+    let inactive = Vec::new();
     let mut names = BTreeMap::<String, ()>::new();
     let mut blackboard_enabled = true;
     for entry in &config.plugins {
@@ -227,20 +227,7 @@ pub fn resolve_plugins(config: &MeshConfig, host_mode: PluginHostMode) -> Result
     }
 
     if blackboard_enabled {
-        if crate::plugins::blackboard::should_launch(
-            host_mode.mesh_visibility,
-            host_mode.blackboard_in_public_meshes,
-        ) {
-            externals.insert(0, blackboard_plugin_spec()?);
-        } else {
-            inactive.push(disabled_plugin_summary(
-                BLACKBOARD_PLUGIN_ID,
-                "builtin",
-                None,
-                Vec::new(),
-                "Disabled in public meshes",
-            ));
-        }
+        externals.insert(0, blackboard_plugin_spec()?);
     }
 
     Ok(ResolvedPlugins {
@@ -261,30 +248,10 @@ pub fn blackboard_plugin_spec() -> Result<ExternalPluginSpec> {
     })
 }
 
-fn disabled_plugin_summary(
-    name: impl Into<String>,
-    kind: impl Into<String>,
-    command: Option<String>,
-    args: Vec<String>,
-    reason: impl Into<String>,
-) -> PluginSummary {
-    PluginSummary {
-        name: name.into(),
-        kind: kind.into(),
-        enabled: false,
-        status: "disabled".into(),
-        version: None,
-        capabilities: Vec::new(),
-        command,
-        args,
-        tools: Vec::new(),
-        error: Some(reason.into()),
-    }
-}
-
 impl PluginManager {
     pub async fn start(
         specs: &ResolvedPlugins,
+        host_mode: PluginHostMode,
         mesh_tx: mpsc::Sender<PluginMeshEvent>,
     ) -> Result<Self> {
         if specs.externals.is_empty() {
@@ -313,7 +280,9 @@ impl PluginManager {
                 "Loading plugin"
             );
             let plugin =
-                match ExternalPlugin::spawn(spec, mesh_tx.clone(), rpc_bridge.clone()).await {
+                match ExternalPlugin::spawn(spec, host_mode, mesh_tx.clone(), rpc_bridge.clone())
+                    .await
+                {
                     Ok(plugin) => plugin,
                     Err(err) => {
                         tracing::error!(
@@ -519,11 +488,13 @@ impl PluginManager {
 impl ExternalPlugin {
     async fn spawn(
         spec: &ExternalPluginSpec,
+        host_mode: PluginHostMode,
         mesh_tx: mpsc::Sender<PluginMeshEvent>,
         rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
     ) -> Result<Self> {
         let plugin = Self {
             spec: spec.clone(),
+            host_mode,
             summary: Arc::new(Mutex::new(PluginSummary {
                 name: spec.name.clone(),
                 kind: "external".into(),
@@ -544,11 +515,19 @@ impl ExternalPlugin {
             next_request_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
         };
-        plugin.ensure_running().await?;
+        if let Err(err) = plugin.ensure_running().await {
+            if plugin.is_disabled().await {
+                return Ok(plugin);
+            }
+            return Err(err);
+        }
         Ok(plugin)
     }
 
     async fn supervise(&self) -> Result<()> {
+        if self.is_disabled().await {
+            return Ok(());
+        }
         self.ensure_running().await?;
         let response = self
             .request(proto::envelope::Payload::HealthRequest(
@@ -585,6 +564,9 @@ impl ExternalPlugin {
     }
 
     async fn ensure_running(&self) -> Result<()> {
+        if let Some(reason) = self.disabled_reason().await {
+            bail!("Plugin '{}' is disabled: {}", self.spec.name, reason);
+        }
         if self.runtime.lock().await.is_some() {
             return Ok(());
         }
@@ -668,12 +650,19 @@ impl ExternalPlugin {
                         host_protocol_version: PROTOCOL_VERSION,
                         host_version: crate::VERSION.to_string(),
                         host_info_json,
+                        mesh_visibility: proto_mesh_visibility(self.host_mode.mesh_visibility),
                     }),
                 )
                 .await?;
 
             let init = match response.payload {
                 Some(proto::envelope::Payload::InitializeResponse(resp)) => resp,
+                Some(proto::envelope::Payload::ErrorResponse(err))
+                    if err.code == STARTUP_DISABLED_ERROR_CODE =>
+                {
+                    self.mark_disabled(generation, err.message).await;
+                    bail!("Plugin '{}' is disabled", self.spec.name);
+                }
                 Some(proto::envelope::Payload::ErrorResponse(err)) => {
                     bail!(
                         "Plugin '{}' rejected initialize: {}",
@@ -709,6 +698,9 @@ impl ExternalPlugin {
         let init = match init_result {
             Ok(init) => init,
             Err(err) => {
+                if self.is_disabled().await {
+                    return Err(err);
+                }
                 self.handle_runtime_failure(
                     Some(generation),
                     format!("Plugin '{}' failed initialize: {err}", self.spec.name),
@@ -1038,6 +1030,44 @@ impl ExternalPlugin {
         drop(runtime);
         let mut summary = self.summary.lock().await;
         summary.status = "restarting".into();
+        summary.error = Some(reason);
+    }
+
+    async fn disabled_reason(&self) -> Option<String> {
+        let summary = self.summary.lock().await;
+        if summary.status == "disabled" {
+            Some(
+                summary
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "disabled".to_string()),
+            )
+        } else {
+            None
+        }
+    }
+
+    async fn is_disabled(&self) -> bool {
+        self.disabled_reason().await.is_some()
+    }
+
+    async fn mark_disabled(&self, generation: u64, reason: String) {
+        let mut runtime = self.runtime.lock().await;
+        if runtime.as_ref().map(|runtime| runtime.generation) == Some(generation) {
+            *runtime = None;
+        }
+        drop(runtime);
+
+        let mut server_info = self.server_info.lock().await;
+        *server_info = None;
+        drop(server_info);
+
+        let mut summary = self.summary.lock().await;
+        summary.enabled = false;
+        summary.status = "disabled".into();
+        summary.version = None;
+        summary.capabilities.clear();
+        summary.tools.clear();
         summary.error = Some(reason);
     }
 }
@@ -1420,6 +1450,13 @@ fn format_tool_names_for_log(tools: &[ToolSummary]) -> String {
     format_slice_for_log(&names)
 }
 
+fn proto_mesh_visibility(mesh_visibility: MeshVisibility) -> i32 {
+    match mesh_visibility {
+        MeshVisibility::Private => proto::MeshVisibility::Private as i32,
+        MeshVisibility::Public => proto::MeshVisibility::Public as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,7 +1464,6 @@ mod tests {
     fn private_host_mode() -> PluginHostMode {
         PluginHostMode {
             mesh_visibility: MeshVisibility::Private,
-            blackboard_in_public_meshes: false,
         }
     }
 
@@ -1455,29 +1491,11 @@ mod tests {
     }
 
     #[test]
-    fn blackboard_is_not_launched_on_public_meshes_by_default() {
+    fn blackboard_is_resolved_on_public_meshes() {
         let resolved = resolve_plugins(
             &MeshConfig::default(),
             PluginHostMode {
                 mesh_visibility: MeshVisibility::Public,
-                blackboard_in_public_meshes: false,
-            },
-        )
-        .unwrap();
-        assert!(resolved.externals.is_empty());
-        assert_eq!(resolved.inactive.len(), 1);
-        assert_eq!(resolved.inactive[0].name, BLACKBOARD_PLUGIN_ID);
-        assert!(!resolved.inactive[0].enabled);
-        assert_eq!(resolved.inactive[0].status, "disabled");
-    }
-
-    #[test]
-    fn blackboard_can_be_enabled_on_public_meshes() {
-        let resolved = resolve_plugins(
-            &MeshConfig::default(),
-            PluginHostMode {
-                mesh_visibility: MeshVisibility::Public,
-                blackboard_in_public_meshes: true,
             },
         )
         .unwrap();
