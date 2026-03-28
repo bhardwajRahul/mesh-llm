@@ -892,17 +892,19 @@ mod tests {
 
     #[test]
     fn test_free_disk_space() {
-        let tmp = std::env::temp_dir().join("test_file.gguf");
-        let free = free_disk_space(&tmp);
-        if cfg!(unix) {
-            // Unix: should return Some for an existing path
-            assert!(free.is_some(), "should get free space for temp dir");
+        let path = std::env::temp_dir().join("test_file.gguf");
+        let free = free_disk_space(&path);
+
+        #[cfg(unix)]
+        {
+            assert!(free.is_some(), "should get free space for {}", path.display());
             let bytes = free.unwrap();
             assert!(bytes > 1_000_000_000, "should have >1GB free, got {bytes}");
-            eprintln!("Free disk space: {:.1} GB", bytes as f64 / 1e9);
-        } else {
-            // Windows: not implemented, returns None
-            assert!(free.is_none(), "expected None on non-unix");
+        }
+
+        #[cfg(not(unix))]
+        {
+            assert!(free.is_none(), "non-unix builds should skip statvfs checks");
         }
     }
 }
