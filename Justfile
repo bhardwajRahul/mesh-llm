@@ -4,7 +4,7 @@ llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
 mesh_dir := "mesh-llm"
 ui_dir := mesh_dir / "ui"
-models_dir := env("HOME") / ".models"
+models_dir := env("HOME", env("USERPROFILE")) / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
 # Build for the current platform (macOS→Metal, Linux/Windows→auto backend)
