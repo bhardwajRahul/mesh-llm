@@ -169,6 +169,177 @@ jobs:
           target/release/mesh-llm --version
           target/release/mesh-llm --help | head -5
 
+  linux_cuda:
+    name: Linux CUDA
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+    steps:
+      - name: Install base packages
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ca-certificates \
+            curl \
+            git \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            python3
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@just
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build Linux CUDA backend
+        shell: bash
+        run: |
+          just --shell bash --shell-arg -lc release-build-cuda
+
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  linux_rocm:
+    name: Linux ROCm
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.0-complete
+
+    steps:
+      - name: Install base packages
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ca-certificates \
+            curl \
+            git \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            python3
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@just
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build Linux ROCm backend
+        shell: bash
+        run: |
+          just --shell bash --shell-arg -lc release-build-amd
+
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  linux_vulkan:
+    name: Linux Vulkan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Vulkan build packages
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ca-certificates \
+            curl \
+            git \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libssl-dev \
+            libvulkan-dev \
+            glslc \
+            python3
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@just
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build Linux Vulkan backend
+        shell: bash
+        run: |
+          just --shell bash --shell-arg -lc release-build-vulkan
+
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
   windows:
     name: Windows ${{ matrix.name }}
     runs-on: windows-2022
