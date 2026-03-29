@@ -19,7 +19,7 @@ const SELF_UPDATE_DISABLED_ENV: &str = "MESH_LLM_NO_SELF_UPDATE";
 const SELF_UPDATE_REPO_ENV: &str = "MESH_LLM_SELF_UPDATE_REPO";
 
 enum InstallOutcome {
-    #[cfg(not(windows))]
+    #[cfg_attr(windows, allow(dead_code))]
     RestartNow,
     #[cfg_attr(not(windows), allow(dead_code))]
     HandoffAndExit,
