@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO="${MESH_LLM_INSTALL_REPO:-michaelneale/mesh-llm}"
+REPO_REF="${MESH_LLM_INSTALL_REF:-main}"
 INSTALL_DIR="${MESH_LLM_INSTALL_DIR:-$HOME/.local/bin}"
 INSTALL_FLAVOR="${MESH_LLM_INSTALL_FLAVOR:-}"
 INSTALL_SERVICE="${MESH_LLM_INSTALL_SERVICE:-0}"
@@ -23,6 +24,9 @@ LAUNCHD_LOG_DIR="$HOME/Library/Logs/mesh-llm"
 LAUNCHD_STDOUT_LOG="$LAUNCHD_LOG_DIR/stdout.log"
 LAUNCHD_STDERR_LOG="$LAUNCHD_LOG_DIR/stderr.log"
 SYSTEMD_ARGS_COMMENT_PREFIX="# mesh-llm-install-args: "
+DIST_DIR="dist"
+SYSTEMD_TEMPLATE_PATH="$DIST_DIR/$SERVICE_NAME.service"
+LAUNCHD_TEMPLATE_PATH="$DIST_DIR/$SERVICE_LABEL.plist"
 
 need_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -61,6 +65,7 @@ Options:
 Environment overrides:
   MESH_LLM_INSTALL_DIR
   MESH_LLM_INSTALL_FLAVOR
+  MESH_LLM_INSTALL_REF=main
   MESH_LLM_INSTALL_SERVICE=1
   MESH_LLM_INSTALL_SERVICE_ARGS='--auto'
   MESH_LLM_INSTALL_SERVICE_START=0
@@ -416,6 +421,80 @@ systemd_quote_token() {
     printf '"%s"' "$value"
 }
 
+local_template_path() {
+    local rel_path="$1"
+    local source_path="${BASH_SOURCE[0]}"
+    local script_dir
+
+    if [[ "$source_path" != */* ]]; then
+        return 1
+    fi
+
+    script_dir="$(cd "$(dirname "$source_path")" && pwd)"
+    [[ -f "$script_dir/$rel_path" ]] || return 1
+    printf '%s\n' "$script_dir/$rel_path"
+}
+
+template_stream() {
+    local rel_path="$1"
+    local local_path
+
+    if local_path="$(local_template_path "$rel_path")"; then
+        cat "$local_path"
+        return 0
+    fi
+
+    curl -fsSL "https://raw.githubusercontent.com/${REPO}/${REPO_REF}/${rel_path}"
+}
+
+render_template_to_file() {
+    local template_path="$1"
+    local output_path="$2"
+    shift 2
+
+    local -a replacements=("$@")
+    local -a env_vars=()
+    local pair
+    local key
+    local value
+    for pair in "${replacements[@]}"; do
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        env_vars+=("TPL_${key}=${value}")
+    done
+
+    env "${env_vars[@]}" awk '
+        BEGIN {
+            split("ARGS_METADATA ENV_LINES", multiline_keys, " ");
+            for (i in multiline_keys) {
+                multiline[multiline_keys[i]] = 1;
+            }
+        }
+        {
+            line = $0;
+            for (name in multiline) {
+                marker = "@" name "@";
+                if (line == marker) {
+                    print ENVIRON["TPL_" name];
+                    next;
+                }
+            }
+            for (var in ENVIRON) {
+                if (index(var, "TPL_") != 1) {
+                    continue;
+                }
+                name = substr(var, 5);
+                if (name in multiline) {
+                    continue;
+                }
+                marker = "@" name "@";
+                gsub(marker, ENVIRON[var], line);
+            }
+            print line;
+        }
+    ' < <(template_stream "$template_path") > "$output_path"
+}
+
 ensure_service_args_file() {
     if [[ -n "$INSTALL_SERVICE_ARGS" ]]; then
         write_service_args_file "$SERVICE_ARGS_FILE" "$INSTALL_SERVICE_ARGS"
@@ -511,29 +590,11 @@ install_systemd_service() {
         exec_line+=" \${MESH_LLM_ARG_${i}}"
     done
 
-    {
-        echo "$SYSTEMD_ARGS_COMMENT_PREFIX$SERVICE_ARGS_SERIALIZED"
-        cat <<EOF
-[Unit]
-Description=Mesh LLM user service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=-$SERVICE_ENV_FILE
-EOF
-        printf '%b' "$env_lines"
-        echo "$exec_line"
-        cat <<'EOF'
-WorkingDirectory=%h
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-    } > "$SYSTEMD_UNIT_PATH"
+    render_template_to_file "$SYSTEMD_TEMPLATE_PATH" "$SYSTEMD_UNIT_PATH" \
+        "ARGS_METADATA=$SYSTEMD_ARGS_COMMENT_PREFIX$SERVICE_ARGS_SERIALIZED" \
+        "SERVICE_ENV_FILE=$SERVICE_ENV_FILE" \
+        "ENV_LINES=$(printf '%b' "$env_lines")" \
+        "EXEC_LINE=$exec_line"
 
     systemctl --user daemon-reload || true
 
@@ -564,32 +625,12 @@ install_launchd_service() {
     ensure_launchd_service_files
     mkdir -p "$LAUNCHD_AGENT_DIR" "$LAUNCHD_LOG_DIR"
 
-    cat > "$LAUNCHD_PLIST_PATH" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$SERVICE_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$SERVICE_RUNNER</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>$HOME</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>StandardOutPath</key>
-    <string>$LAUNCHD_STDOUT_LOG</string>
-    <key>StandardErrorPath</key>
-    <string>$LAUNCHD_STDERR_LOG</string>
-</dict>
-</plist>
-EOF
+    render_template_to_file "$LAUNCHD_TEMPLATE_PATH" "$LAUNCHD_PLIST_PATH" \
+        "SERVICE_LABEL=$SERVICE_LABEL" \
+        "SERVICE_RUNNER=$SERVICE_RUNNER" \
+        "HOME_DIR=$HOME" \
+        "STDOUT_LOG=$LAUNCHD_STDOUT_LOG" \
+        "STDERR_LOG=$LAUNCHD_STDERR_LOG"
 
     local launch_domain="gui/$(id -u)"
     if bool_is_true "$INSTALL_SERVICE_START"; then
