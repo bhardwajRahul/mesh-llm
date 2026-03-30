@@ -2800,7 +2800,12 @@ impl Node {
             existing.gpu_vram = ann.gpu_vram.clone();
             existing.gpu_bandwidth_gbps = ann.gpu_bandwidth_gbps.clone();
             let updated_peer = existing.clone();
-            let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
+            let changed = peer_meaningfully_changed(&old_peer, &updated_peer)
+                || old_peer.gpu_name != updated_peer.gpu_name
+                || old_peer.hostname != updated_peer.hostname
+                || old_peer.is_soc != updated_peer.is_soc
+                || old_peer.gpu_vram != updated_peer.gpu_vram
+                || old_peer.gpu_bandwidth_gbps != updated_peer.gpu_bandwidth_gbps;
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
