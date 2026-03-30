@@ -7,7 +7,7 @@ This file covers local build and development workflows for this repository.
 - `just`
 - `cmake`
 - Rust toolchain (`cargo`)
-- Node.js + npm (for UI development)
+- Node.js 24 + npm (for UI development)
 
 **macOS**: Apple Silicon. Metal is used automatically.
 
@@ -57,6 +57,12 @@ For Vulkan builds, force the backend explicitly:
 
 ```bash
 just build backend=vulkan
+```
+
+For CPU-only builds (no GPU acceleration):
+
+```bash
+just build backend=cpu
 ```
 
 Create a portable bundle:
