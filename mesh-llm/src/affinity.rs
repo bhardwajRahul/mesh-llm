@@ -223,20 +223,32 @@ impl Default for AffinityRouter {
 impl AffinityState {
     fn prune_expired(&mut self) {
         let now = Instant::now();
-        let expired: Vec<_> = self
-            .entries
-            .iter()
-            .filter_map(|(key, entry)| {
-                if now.duration_since(entry.last_used) > AFFINITY_TTL {
-                    Some(key.clone())
-                } else {
-                    None
+
+        loop {
+            let front_key = match self.lru.front() {
+                Some(key) => key.clone(),
+                None => break,
+            };
+
+            match self.entries.get(&front_key) {
+                Some(entry) => {
+                    if now.duration_since(entry.last_used) > AFFINITY_TTL {
+                        // Oldest entry is expired: evict it.
+                        self.lru.pop_front();
+                        if self.entries.remove(&front_key).is_some() {
+                            self.stats.prefix_stale += 1;
+                        }
+                        // Continue to check next-oldest entry.
+                    } else {
+                        // Oldest entry is not expired; newer ones cannot be expired yet.
+                        break;
+                    }
                 }
-            })
-            .collect();
-        for key in expired {
-            self.remove_key(&key);
-            self.stats.prefix_stale += 1;
+                None => {
+                    // Key is in LRU but missing from entries; drop it from LRU and continue.
+                    self.lru.pop_front();
+                }
+            }
         }
     }
 
