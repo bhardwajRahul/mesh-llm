@@ -287,10 +287,14 @@ fn find_hf_cache_model_path(root: &Path, stem: &str) -> Option<PathBuf> {
                 continue;
             };
             for file in files {
-                let Some(name) = Path::new(&file).file_name().and_then(|value| value.to_str()) else {
+                let Some(name) = Path::new(&file)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                else {
                     continue;
                 };
-                if name == filename || (name.starts_with(&split_prefix) && name.ends_with(".gguf")) {
+                if name == filename || (name.starts_with(&split_prefix) && name.ends_with(".gguf"))
+                {
                     return Some(repo.pointer_path(cache_ref.commit_hash()).join(file));
                 }
             }

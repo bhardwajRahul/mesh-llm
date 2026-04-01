@@ -1296,7 +1296,10 @@ fn clear_progress_line() -> Result<()> {
 fn cached_repos() -> Result<Vec<CachedRepo>> {
     let cache = huggingface_hub_cache();
     let mut repos = Vec::new();
-    for repo in cache.repos().context("Enumerate cached Hugging Face repos")? {
+    for repo in cache
+        .repos()
+        .context("Enumerate cached Hugging Face repos")?
+    {
         if repo.repo().repo_type() != RepoType::Model {
             continue;
         }
