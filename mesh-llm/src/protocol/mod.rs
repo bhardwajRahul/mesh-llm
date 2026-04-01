@@ -403,6 +403,7 @@ mod tests {
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::new(),
+            served_model_descriptors: vec![],
         }
     }
 

@@ -158,6 +158,7 @@ type MeshModel = {
   request_count?: number;
   last_active_secs_ago?: number;
   source_ref?: string;
+  source_revision?: string;
   source_file?: string;
   active_nodes?: string[];
 };
@@ -4576,6 +4577,8 @@ function ModelSidebar({
   activePeers: ActivePeerRow[];
 }) {
   const [copiedRef, setCopiedRef] = useState(false);
+  const fullFileName = modelFullFileName(model);
+  const revisionFileName = modelRevisionFileName(model);
 
   const copySourceRef = useCallback(async () => {
     if (!model.source_ref) return;
@@ -4740,7 +4743,7 @@ function ModelSidebar({
           || model.quantization
           || model.draft_model
           || model.source_ref
-          || model.source_file
+          || model.source_revision
           || model.expert_count
           || model.used_expert_count) ? (
           <Card>
@@ -4757,7 +4760,25 @@ function ModelSidebar({
                   <ModelMetaItem label="MoE Topology" value={`${model.expert_count} experts · top-${model.used_expert_count}`} />
                 ) : null}
                 {model.source_ref ? <ModelMetaItem label="Source" value={model.source_ref} /> : null}
-                {model.source_file ? <ModelMetaItem label="File" value={model.source_file} /> : null}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {(model.name || fullFileName || revisionFileName) ? (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Model Files</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div className="grid gap-3">
+                <ModelMetaItem label="Shorthand" value={model.name} copyValue={model.name} />
+                {fullFileName ? (
+                  <ModelMetaItem label="Full name" value={fullFileName} copyValue={fullFileName} />
+                ) : null}
+                {revisionFileName ? (
+                  <ModelMetaItem label="Revision" value={revisionFileName} copyValue={revisionFileName} />
+                ) : null}
               </div>
             </CardContent>
           </Card>
@@ -4871,10 +4892,46 @@ function ModelFactCard({
   );
 }
 
-function ModelMetaItem({ label, value }: { label: string; value: string }) {
+function ModelMetaItem({
+  label,
+  value,
+  copyValue,
+}: {
+  label: string;
+  value: string;
+  copyValue?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = useCallback(async () => {
+    if (!copyValue) return;
+    try {
+      await navigator.clipboard.writeText(copyValue);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }, [copyValue]);
+
   return (
     <div className="rounded-lg border bg-muted/25 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
+        {copyValue ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 rounded-full p-0 text-muted-foreground hover:text-foreground"
+            onClick={() => void copy()}
+            aria-label={copied ? `${label} copied` : `Copy ${label}`}
+            title={copied ? 'Copied' : `Copy ${label}`}
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </Button>
+        ) : null}
+      </div>
       <div className="mt-1 text-sm font-medium [overflow-wrap:anywhere]">{value}</div>
     </div>
   );
@@ -4940,6 +4997,20 @@ function huggingFacePathFromUrl(url?: string) {
   return url
     .replace(/^https?:\/\/huggingface\.co\//, '')
     .replace(/\/$/, '');
+}
+
+function modelFullFileName(model?: MeshModel | null) {
+  if (!model) return null;
+  if (model.source_ref && model.source_file) {
+    return `${model.source_ref}/${model.source_file}`;
+  }
+  return model.source_file || model.source_ref || null;
+}
+
+function modelRevisionFileName(model?: MeshModel | null) {
+  const fullName = modelFullFileName(model);
+  if (!fullName || !model?.source_revision) return null;
+  return `${fullName}@${model.source_revision}`;
 }
 
 function formatAge(seconds: number) {

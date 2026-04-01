@@ -534,6 +534,8 @@ pub(crate) struct PeerAnnouncementV0 {
     gpu_bandwidth_gbps: Option<String>,
     #[serde(default)]
     available_model_sizes: HashMap<String, u64>,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    served_model_descriptors: Vec<ServedModelDescriptor>,
 }
 
 impl PeerAnnouncementV0 {
@@ -564,7 +566,7 @@ impl PeerAnnouncementV0 {
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: self.available_model_sizes,
-            served_model_descriptors: vec![],
+            served_model_descriptors: self.served_model_descriptors,
         }
     }
 }
@@ -590,6 +592,7 @@ impl From<&PeerAnnouncement> for PeerAnnouncementV0 {
             gpu_vram: ann.gpu_vram.clone(),
             gpu_bandwidth_gbps: ann.gpu_bandwidth_gbps.clone(),
             available_model_sizes: ann.available_model_sizes.clone(),
+            served_model_descriptors: ann.served_model_descriptors.clone(),
         }
     }
 }
@@ -4823,6 +4826,7 @@ mod tests {
             gpu_vram: Some("51539607552".into()),
             gpu_bandwidth_gbps: None,
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
+            served_model_descriptors: vec![],
         };
         let json = serde_json::to_vec(&vec![ann.clone()]).unwrap();
 
