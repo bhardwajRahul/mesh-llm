@@ -22,6 +22,7 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import {
+  ArrowLeft,
   Bot,
   Braces,
   ChevronDown,
@@ -170,6 +171,35 @@ type ActivePeerRow = {
   latencyLabel: string;
   vramLabel: string;
   shareLabel: string;
+};
+
+type DetailPanelEntry =
+  | { kind: "node"; nodeId: string }
+  | { kind: "model"; modelName: string; fromNodeId?: string };
+
+type NodeSidebarRecord = {
+  id: string;
+  title: string;
+  hostname?: string;
+  self: boolean;
+  role: string;
+  statusLabel: string;
+  latencyLabel: string;
+  vramGb: number;
+  vramSharePct: number;
+  isSoc?: boolean;
+  gpus: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
+  hostedModels: string[];
+  hotModels: string[];
+  servingModels: string[];
+  requestedModels: string[];
+  availableModels: string[];
+  version?: string;
+  latestVersion?: string | null;
+  llamaReady?: boolean;
+  apiPort?: number;
+  inflightRequests?: number;
+  privacyLimited: boolean;
 };
 
 function modelDisplayName(model?: MeshModel | null) {
@@ -345,6 +375,41 @@ function peerStatusLabel(peer: Peer): string {
     return "Assigned";
   if (peer.role === "Host") return "Host";
   return "Idle";
+}
+
+function topologyNodeRole(node: Pick<TopologyNode, "client" | "host" | "serving">): string {
+  if (node.client) return "Client";
+  if (node.host) return "Host";
+  if (node.serving && node.serving !== "(idle)") return "Worker";
+  return "Idle";
+}
+
+function nodeRoleTone(role: string): 'good' | 'info' | 'neutral' {
+  if (role === 'Host') return 'good';
+  if (role === 'Worker' || role === 'Client') return 'info';
+  return 'neutral';
+}
+
+function uniqueModels(...groups: Array<string[] | undefined>): string[] {
+  return [...new Set(groups.flatMap((group) => group ?? []).filter((model) => !!model && model !== '(idle)'))];
+}
+
+function formatGpuMemory(bytes?: number | null) {
+  if (!bytes || !Number.isFinite(bytes)) return "Unknown";
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(0)} GB`;
+}
+
+function trimGpuVendor(name: string) {
+  return name
+    .replace(/^NVIDIA GeForce\s+/i, "")
+    .replace(/^NVIDIA Quadro\s+/i, "")
+    .replace(/^NVIDIA\s+/i, "")
+    .replace(/^AMD Radeon\s+/i, "")
+    .replace(/^AMD\s+/i, "")
+    .replace(/^Intel Arc\s+/i, "")
+    .replace(/^Intel\s+/i, "")
+    .replace(/^Apple\s+/i, "")
+    .trim();
 }
 
 function sectionFromPathname(pathname: string): TopSection | null {
@@ -3057,7 +3122,7 @@ function DashboardPage({
     "all",
   );
   const [isMeshOverviewFullscreen, setIsMeshOverviewFullscreen] = useState(false);
-  const [selectedCatalogModel, setSelectedCatalogModel] = useState<MeshModel | null>(null);
+  const [detailPanelStack, setDetailPanelStack] = useState<DetailPanelEntry[]>([]);
   const filteredModels = useMemo(() => {
     const models = meshModels;
     return [...models]
@@ -3101,6 +3166,12 @@ function DashboardPage({
     });
   }, [sortedPeers, totalMeshVramGb]);
   const activePeerRows = useMemo(() => {
+    const currentDetail = detailPanelStack[detailPanelStack.length - 1];
+    const activeModelName =
+      currentDetail?.kind === "model" ? currentDetail.modelName : null;
+    const selectedCatalogModel = activeModelName
+      ? meshModelByName[activeModelName] ?? null
+      : null;
     if (!selectedCatalogModel || selectedCatalogModel.status !== "warm" || !status) {
       return [] as ActivePeerRow[];
     }
@@ -3132,7 +3203,97 @@ function DashboardPage({
       });
     }
     return rows;
-  }, [peerRows, selectedCatalogModel, status]);
+  }, [detailPanelStack, meshModelByName, peerRows, status]);
+
+  const activeDetail = detailPanelStack[detailPanelStack.length - 1] ?? null;
+  const activeModel =
+    activeDetail?.kind === "model"
+      ? meshModelByName[activeDetail.modelName] ?? null
+      : null;
+  const activeNode = useMemo(() => {
+    if (!status || activeDetail?.kind !== "node") return null;
+    const topologyNode = topologyNodes.find((node) => node.id === activeDetail.nodeId);
+    if (!topologyNode) return null;
+    const peer = topologyNode.self
+      ? null
+      : status.peers.find((candidate) => candidate.id === topologyNode.id);
+    const hostedModels = topologyNode.self
+      ? uniqueModels(localRoutableModels(status))
+      : uniqueModels(peer ? peerRoutableModels(peer) : []);
+    const servingModels = topologyNode.self
+      ? uniqueModels(status.serving_models)
+      : uniqueModels(peer ? peerAssignedModels(peer) : []);
+    const requestedModels = topologyNode.self
+      ? uniqueModels(status.requested_models)
+      : uniqueModels(peer?.requested_models);
+    return {
+      id: topologyNode.id,
+      title: topologyNode.hostname || topologyNode.id,
+      hostname: topologyNode.hostname,
+      self: topologyNode.self,
+      role: topologyNodeRole(topologyNode),
+      statusLabel: topologyNode.statusLabel,
+      latencyLabel: topologyNode.self ? "local" : formatLatency(topologyNode.latencyMs),
+      vramGb: Math.max(0, topologyNode.vram),
+      vramSharePct:
+        topologyNode.client || totalMeshVramGb <= 0
+          ? 0
+          : Math.round((Math.max(0, topologyNode.vram) / totalMeshVramGb) * 100),
+      isSoc: topologyNode.isSoc,
+      gpus: topologyNode.gpus ?? [],
+      hostedModels,
+      hotModels: uniqueModels(hostedModels, servingModels, requestedModels),
+      servingModels,
+      requestedModels,
+      availableModels: topologyNode.self
+        ? uniqueModels(status.available_models)
+        : uniqueModels(peer?.available_models),
+      version: topologyNode.self ? status.version : undefined,
+      latestVersion: topologyNode.self ? status.latest_version : undefined,
+      llamaReady: topologyNode.self ? status.llama_ready : undefined,
+      apiPort: topologyNode.self ? status.api_port : undefined,
+      inflightRequests: topologyNode.self ? status.inflight_requests : undefined,
+      privacyLimited:
+        !topologyNode.self &&
+        !topologyNode.hostname &&
+        !(topologyNode.gpus?.length ?? 0),
+    } satisfies NodeSidebarRecord;
+  }, [activeDetail, status, topologyNodes, totalMeshVramGb]);
+
+  function pushDetail(entry: DetailPanelEntry) {
+    setDetailPanelStack((prev) => {
+      const current = prev[prev.length - 1];
+      const isSameEntry =
+        !!current &&
+        ((current.kind === "node" &&
+          entry.kind === "node" &&
+          current.nodeId === entry.nodeId) ||
+          (current.kind === "model" &&
+            entry.kind === "model" &&
+            current.modelName === entry.modelName));
+      if (isSameEntry) {
+        return prev;
+      }
+      return [...prev, entry];
+    });
+  }
+
+  function openNodeDetail(nodeId: string) {
+    pushDetail({ kind: "node", nodeId });
+  }
+
+  function openModelDetail(modelName: string, fromNodeId?: string) {
+    if (!meshModelByName[modelName]) return;
+    pushDetail({ kind: "model", modelName, fromNodeId });
+  }
+
+  function closeDetailPanel() {
+    setDetailPanelStack([]);
+  }
+
+  function goBackDetailPanel() {
+    setDetailPanelStack((prev) => prev.slice(0, -1));
+  }
 
   useEffect(() => {
     const prevOverflow = document.body.style.overflow;
@@ -3269,6 +3430,7 @@ function DashboardPage({
                   nodes={topologyNodes}
                   selectedModel={selectedModel}
                   themeMode={themeMode}
+                  onOpenNode={openNodeDetail}
                   fullscreen={false}
                   heightClass="h-[360px] md:h-[420px] lg:h-[460px] xl:h-[520px]"
                 />
@@ -3309,7 +3471,7 @@ function DashboardPage({
                     <button
                       key={model.name}
                       type="button"
-                      onClick={() => setSelectedCatalogModel(model)}
+                      onClick={() => openModelDetail(model.name)}
                       className="block w-full rounded-md border p-3 text-left transition-colors hover:border-primary/35 hover:bg-muted/30"
                     >
                       <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-start">
@@ -3392,7 +3554,11 @@ function DashboardPage({
                   </TableHeader>
                   <TableBody>
                     {peerRows.map((peer) => (
-                      <TableRow key={peer.id}>
+                      <TableRow
+                        key={peer.id}
+                        className="cursor-pointer transition-colors hover:bg-muted/30"
+                        onClick={() => openNodeDetail(peer.id)}
+                      >
                         <TableCell className="font-mono text-xs">
                           {peer.id}
                         </TableCell>
@@ -3454,6 +3620,7 @@ function DashboardPage({
                       nodes={topologyNodes}
                       selectedModel={selectedModel}
                       themeMode={themeMode}
+                      onOpenNode={openNodeDetail}
                       fullscreen
                       heightClass="min-h-[420px]"
                       containerStyle={{
@@ -3470,12 +3637,22 @@ function DashboardPage({
           )
         : null}
 
-      <Sheet open={!!selectedCatalogModel} onOpenChange={(open) => !open && setSelectedCatalogModel(null)}>
-      <SheetContent side="right" className="w-full overflow-y-auto border-l bg-background/95 p-0 backdrop-blur sm:max-w-2xl">
-          {selectedCatalogModel ? (
+      <Sheet open={detailPanelStack.length > 0} onOpenChange={(open) => !open && closeDetailPanel()}>
+        <SheetContent side="right" className="w-full overflow-y-auto border-l bg-background/95 p-0 backdrop-blur sm:max-w-2xl">
+          {activeDetail?.kind === "node" && activeNode ? (
+            <NodeSidebar
+              node={activeNode}
+              meshModelByName={meshModelByName}
+              onOpenModel={openModelDetail}
+              onBack={detailPanelStack.length > 1 ? goBackDetailPanel : undefined}
+            />
+          ) : null}
+          {activeDetail?.kind === "model" && activeModel ? (
             <ModelSidebar
-              model={selectedCatalogModel}
+              model={activeModel}
               activePeers={activePeerRows}
+              onOpenNode={openNodeDetail}
+              onBack={detailPanelStack.length > 1 ? goBackDetailPanel : undefined}
             />
           ) : null}
         </SheetContent>
@@ -3794,6 +3971,7 @@ function MeshTopologyDiagram({
   nodes,
   selectedModel,
   themeMode,
+  onOpenNode,
   fullscreen = false,
   heightClass,
   containerStyle,
@@ -3802,6 +3980,7 @@ function MeshTopologyDiagram({
   nodes: TopologyNode[];
   selectedModel: string;
   themeMode: ThemeMode;
+  onOpenNode?: (nodeId: string) => void;
   fullscreen?: boolean;
   heightClass?: string;
   containerStyle?: CSSProperties;
@@ -3816,6 +3995,7 @@ function MeshTopologyDiagram({
       nodes={nodes}
       selectedModel={selectedModel}
       themeMode={themeMode}
+      onOpenNode={onOpenNode}
       fullscreen={fullscreen}
       heightClass={heightClass}
       containerStyle={containerStyle}
@@ -3828,6 +4008,7 @@ function MeshTopologyFlow({
   nodes,
   selectedModel,
   themeMode,
+  onOpenNode,
   fullscreen,
   heightClass,
   containerStyle,
@@ -3836,6 +4017,7 @@ function MeshTopologyFlow({
   nodes: TopologyNode[];
   selectedModel: string;
   themeMode: ThemeMode;
+  onOpenNode?: (nodeId: string) => void;
   fullscreen: boolean;
   heightClass?: string;
   containerStyle?: CSSProperties;
@@ -4105,7 +4287,10 @@ function MeshTopologyFlow({
               instance.fitView({ ...fitViewOptions, duration: fitDuration });
             });
           }}
-          onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+          onNodeClick={(_, node) => {
+            setSelectedNodeId(node.id);
+            onOpenNode?.(node.id);
+          }}
           proOptions={{ hideAttribution: true }}
         >
           <Background
@@ -4650,12 +4835,280 @@ function DashboardPanelEmpty({
   );
 }
 
+function NodeSidebar({
+  node,
+  meshModelByName,
+  onOpenModel,
+  onBack,
+}: {
+  node: NodeSidebarRecord;
+  meshModelByName: Record<string, MeshModel>;
+  onOpenModel: (modelName: string, fromNodeId?: string) => void;
+  onBack?: () => void;
+}) {
+  const modelRows = useMemo(() => {
+    const order = new Map<string, number>();
+    node.hotModels.forEach((name, index) => order.set(name, index));
+    node.servingModels.forEach((name, index) => {
+      if (!order.has(name)) order.set(name, node.hotModels.length + index);
+    });
+    node.requestedModels.forEach((name, index) => {
+      if (!order.has(name)) order.set(name, node.hotModels.length + node.servingModels.length + index);
+    });
+    return uniqueModels(node.hotModels, node.servingModels, node.requestedModels)
+      .map((name) => ({
+        name,
+        flags: [
+          node.servingModels.includes(name) ? "Serving" : null,
+          node.hostedModels.includes(name) ? "Hosted" : null,
+          node.requestedModels.includes(name) ? "Requested" : null,
+        ].filter(Boolean) as string[],
+        meshStatus: meshModelByName[name]?.status ?? "unknown",
+      }))
+      .sort((a, b) => (order.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.name) ?? Number.MAX_SAFE_INTEGER));
+  }, [meshModelByName, node]);
+
+  return (
+    <div className="flex min-h-full flex-col">
+      <div className="border-b bg-gradient-to-br from-emerald-50 via-background to-background px-6 pb-3 pt-3 dark:from-emerald-950/20">
+        <SheetHeader className="space-y-2 text-left">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border bg-background text-primary shadow-sm">
+              <Server className="h-3.5 w-3.5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <SheetTitle className="text-lg font-semibold leading-tight tracking-tight [overflow-wrap:anywhere] sm:text-xl">
+                  {node.title}
+                </SheetTitle>
+                {node.self ? (
+                  <Badge className="h-5 rounded-full border-sky-500/45 bg-sky-500/10 px-2 text-[10px] font-medium text-sky-700 dark:border-sky-400/55 dark:bg-sky-400/15 dark:text-sky-200">
+                    You
+                  </Badge>
+                ) : null}
+                <StatusPill
+                  label={node.role}
+                  tone={nodeRoleTone(node.role)}
+                />
+                <StatusPill
+                  label={node.statusLabel}
+                  tone={topologyStatusTone(node.statusLabel)}
+                  dot
+                  tooltip={topologyStatusTooltip(node.statusLabel)}
+                />
+              </div>
+              <SheetDescription className="mt-1.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
+                {node.id}
+              </SheetDescription>
+            </div>
+            {onBack ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5"
+                onClick={onBack}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back
+              </Button>
+            ) : null}
+          </div>
+        </SheetHeader>
+      </div>
+
+      <div className="flex-1 space-y-5 px-6 py-5">
+        <div className="grid gap-3 sm:grid-cols-4">
+          <ModelFactCard
+            title="Latency"
+            value={node.latencyLabel}
+            icon={<Wifi className="h-4 w-4" />}
+          />
+          <ModelFactCard
+            title="Node VRAM"
+            value={`${node.vramGb.toFixed(1)} GB`}
+            icon={<MemoryStick className="h-4 w-4" />}
+          />
+          <ModelFactCard
+            title="Mesh Share"
+            value={node.vramSharePct > 0 ? `${node.vramSharePct}%` : "n/a"}
+            icon={<Gauge className="h-4 w-4" />}
+          />
+          <ModelFactCard
+            title="Hot Models"
+            value={`${modelRows.length}`}
+            icon={<Sparkles className="h-4 w-4" />}
+          />
+        </div>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Sparkles className="h-4 w-4 text-muted-foreground" />
+              <span>Hot Models</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-0">
+            {modelRows.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Model</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead className="text-right">Mesh</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {modelRows.map((row) => {
+                    const modelExists = !!meshModelByName[row.name];
+                    return (
+                      <TableRow key={row.name}>
+                        <TableCell className="max-w-[260px]">
+                          {modelExists ? (
+                            <button
+                              type="button"
+                              className="truncate text-left text-sm font-medium underline-offset-4 hover:text-foreground hover:underline"
+                              onClick={() => onOpenModel(row.name, node.id)}
+                              title={row.name}
+                            >
+                              {shortName(modelDisplayName(meshModelByName[row.name]) || row.name)}
+                            </button>
+                          ) : (
+                            <span className="truncate text-sm font-medium" title={row.name}>
+                              {shortName(row.name)}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {row.flags.map((flag) => (
+                              <StatusPill
+                                key={flag}
+                                label={flag}
+                                tone={flag === "Serving" ? "good" : flag === "Requested" ? "warn" : "info"}
+                              />
+                            ))}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <StatusPill
+                            className="justify-end"
+                            label={
+                              row.meshStatus === "warm"
+                                ? "Warm"
+                                : row.meshStatus === "cold"
+                                  ? "Cold"
+                                  : row.meshStatus
+                            }
+                            tone={
+                              row.meshStatus === "warm"
+                                ? "warm"
+                                : row.meshStatus === "cold"
+                                  ? "cold"
+                                  : "neutral"
+                            }
+                            dot={row.meshStatus === "warm" || row.meshStatus === "cold"}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            ) : (
+              <div className="text-sm text-muted-foreground">
+                No active model assignments on this node.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Cpu className="h-4 w-4 text-muted-foreground" />
+              <span>Hardware</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-0">
+            {node.hostname ? (
+              <ModelMetaItem
+                label="Hostname"
+                value={node.hostname}
+                icon={<Server className="h-3.5 w-3.5" />}
+              />
+            ) : null}
+            {node.gpus.length > 0 ? (
+              <div className="grid gap-3">
+                {node.gpus.map((gpu, index) => (
+                  <ModelMetaItem
+                    key={`${gpu.name}-${index}`}
+                    label={node.isSoc ? `SoC ${index + 1}` : `GPU ${index + 1}`}
+                    value={`${trimGpuVendor(gpu.name) || gpu.name} · ${formatGpuMemory(gpu.vram_bytes)}${gpu.bandwidth_gbps ? ` · ${gpu.bandwidth_gbps.toFixed(0)} GB/s` : ""}`}
+                    icon={node.isSoc ? <Cpu className="h-3.5 w-3.5" /> : <Gpu className="h-3.5 w-3.5" />}
+                  />
+                ))}
+              </div>
+            ) : node.privacyLimited ? (
+              <p className="text-sm leading-6 text-muted-foreground">
+                Hardware details are hidden by this peer&apos;s privacy settings.
+              </p>
+            ) : (
+              <p className="text-sm leading-6 text-muted-foreground">
+                No hardware details reported for this node.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        {node.self ? (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Info className="h-4 w-4 text-muted-foreground" />
+                <span>Runtime</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              {node.version ? (
+                <ModelMetaItem label="Version" value={`v${node.version}`} />
+              ) : null}
+              {node.latestVersion ? (
+                <ModelMetaItem label="Latest" value={`v${node.latestVersion}`} />
+              ) : null}
+              {node.llamaReady != null ? (
+                <ModelMetaItem label="Llama Ready" value={node.llamaReady ? "Yes" : "No"} />
+              ) : null}
+              {node.apiPort != null ? (
+                <ModelMetaItem label="API Port" value={`${node.apiPort}`} />
+              ) : null}
+              {node.inflightRequests != null ? (
+                <ModelMetaItem label="Inflight" value={`${node.inflightRequests}`} />
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {node.availableModels.length > 0 && modelRows.length === 0 ? (
+          <div className="px-1 text-xs text-muted-foreground">
+            Available locally: {node.availableModels.map(shortName).join(", ")}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function ModelSidebar({
   model,
   activePeers,
+  onOpenNode,
+  onBack,
 }: {
   model: MeshModel;
   activePeers: ActivePeerRow[];
+  onOpenNode: (nodeId: string) => void;
+  onBack?: () => void;
 }) {
   const fullFileName = modelFullFileName(model);
   const revisionFileName = modelRevisionFileName(model);
@@ -4702,6 +5155,18 @@ function ModelSidebar({
                 {model.name}
               </SheetDescription>
             </div>
+            {onBack ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5"
+                onClick={onBack}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back
+              </Button>
+            ) : null}
           </div>
         </SheetHeader>
       </div>
@@ -4898,7 +5363,11 @@ function ModelSidebar({
                 </TableHeader>
                 <TableBody>
                   {activePeers.map((peer) => (
-                    <TableRow key={peer.id}>
+                    <TableRow
+                      key={peer.id}
+                      className="cursor-pointer transition-colors hover:bg-muted/30"
+                      onClick={() => onOpenNode(peer.id)}
+                    >
                       <TableCell className="font-mono text-xs">{peer.id}</TableCell>
                       <TableCell className="text-right">{peer.latencyLabel}</TableCell>
                       <TableCell className="text-right">{peer.vramLabel}</TableCell>
