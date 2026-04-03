@@ -78,7 +78,7 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) plugin: Option<String>,
 
-    /// Update mesh-llm before continuing if a newer bundled release is available.
+    /// Update mesh-llm before continuing for release-bundle installs if a newer bundled release is available.
     #[arg(long, global = true)]
     pub(crate) auto_update: bool,
 
