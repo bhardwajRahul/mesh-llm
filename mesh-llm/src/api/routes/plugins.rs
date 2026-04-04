@@ -8,6 +8,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use url::form_urlencoded;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpBindingTransferMode {
+    Buffered,
+    StreamedRequest,
+    StreamedResponse,
+    StreamedBidirectional,
+}
+
 pub(super) async fn handle(
     stream: &mut TcpStream,
     state: &MeshApi,
@@ -219,17 +227,7 @@ async fn handle_stapled_http(
         return Ok(());
     };
 
-    let request_streamed = matches!(
-        crate::plugin::proto::HttpBodyMode::try_from(binding.request_body_mode)
-            .unwrap_or(crate::plugin::proto::HttpBodyMode::Unspecified),
-        crate::plugin::proto::HttpBodyMode::Streamed
-    );
-    let response_streamed = matches!(
-        crate::plugin::proto::HttpBodyMode::try_from(binding.response_body_mode)
-            .unwrap_or(crate::plugin::proto::HttpBodyMode::Unspecified),
-        crate::plugin::proto::HttpBodyMode::Streamed
-    );
-    if request_streamed || response_streamed {
+    if binding_transfer_mode(binding) != HttpBindingTransferMode::Buffered {
         return handle_streamed_http_binding(
             stream,
             &plugin_manager,
@@ -412,6 +410,27 @@ fn method_name(value: i32) -> &'static str {
     }
 }
 
+fn binding_transfer_mode(
+    binding: &crate::plugin::proto::HttpBindingManifest,
+) -> HttpBindingTransferMode {
+    let request_streamed = matches!(
+        crate::plugin::proto::HttpBodyMode::try_from(binding.request_body_mode)
+            .unwrap_or(crate::plugin::proto::HttpBodyMode::Unspecified),
+        crate::plugin::proto::HttpBodyMode::Streamed
+    );
+    let response_streamed = matches!(
+        crate::plugin::proto::HttpBodyMode::try_from(binding.response_body_mode)
+            .unwrap_or(crate::plugin::proto::HttpBodyMode::Unspecified),
+        crate::plugin::proto::HttpBodyMode::Streamed
+    );
+    match (request_streamed, response_streamed) {
+        (false, false) => HttpBindingTransferMode::Buffered,
+        (true, false) => HttpBindingTransferMode::StreamedRequest,
+        (false, true) => HttpBindingTransferMode::StreamedResponse,
+        (true, true) => HttpBindingTransferMode::StreamedBidirectional,
+    }
+}
+
 fn query_arguments(path: &str) -> Map<String, Value> {
     let mut args = Map::new();
     let Some((_, query)) = path.split_once('?') else {
@@ -461,5 +480,42 @@ mod tests {
         assert!(text.contains("Host: localhost\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.ends_with("\r\n\r\n{\"a\":1}"));
+    }
+
+    #[test]
+    fn binding_transfer_mode_covers_all_streaming_combinations() {
+        let mut binding = crate::plugin::proto::HttpBindingManifest {
+            binding_id: "demo".into(),
+            method: crate::plugin::proto::HttpMethod::Post as i32,
+            path: "/demo".into(),
+            operation_name: Some("demo".into()),
+            request_body_mode: crate::plugin::proto::HttpBodyMode::Buffered as i32,
+            response_body_mode: crate::plugin::proto::HttpBodyMode::Buffered as i32,
+            request_schema_json: None,
+            response_schema_json: None,
+        };
+        assert_eq!(
+            binding_transfer_mode(&binding),
+            HttpBindingTransferMode::Buffered
+        );
+
+        binding.request_body_mode = crate::plugin::proto::HttpBodyMode::Streamed as i32;
+        assert_eq!(
+            binding_transfer_mode(&binding),
+            HttpBindingTransferMode::StreamedRequest
+        );
+
+        binding.request_body_mode = crate::plugin::proto::HttpBodyMode::Buffered as i32;
+        binding.response_body_mode = crate::plugin::proto::HttpBodyMode::Streamed as i32;
+        assert_eq!(
+            binding_transfer_mode(&binding),
+            HttpBindingTransferMode::StreamedResponse
+        );
+
+        binding.request_body_mode = crate::plugin::proto::HttpBodyMode::Streamed as i32;
+        assert_eq!(
+            binding_transfer_mode(&binding),
+            HttpBindingTransferMode::StreamedBidirectional
+        );
     }
 }

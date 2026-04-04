@@ -85,12 +85,8 @@ where
     P: Serialize,
 {
     let arguments_json = serde_json::to_string(request)?;
-    let provider = plugin_manager
-        .available_provider_for_capability(OBJECT_STORE_CAPABILITY)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("No provider for capability '{OBJECT_STORE_CAPABILITY}'"))?;
     let result = plugin_manager
-        .call_tool(&provider.plugin_name, tool_name, &arguments_json)
+        .call_tool_by_capability(OBJECT_STORE_CAPABILITY, tool_name, &arguments_json)
         .await?;
     if result.is_error {
         bail!("{}", result.content_json);
@@ -100,12 +96,9 @@ where
 }
 
 pub async fn object_store_available(plugin_manager: &PluginManager) -> bool {
-    matches!(
-        plugin_manager
-            .available_provider_for_capability(OBJECT_STORE_CAPABILITY)
-            .await,
-        Ok(Some(_))
-    )
+    plugin_manager
+        .is_capability_available(OBJECT_STORE_CAPABILITY)
+        .await
 }
 
 #[allow(dead_code)]

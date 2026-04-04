@@ -21,7 +21,7 @@ pub(super) async fn handle(
 async fn handle_feed(stream: &mut TcpStream, state: &MeshApi, path: &str) -> anyhow::Result<()> {
     let plugin_manager = state.inner.lock().await.plugin_manager.clone();
     if !plugin_manager
-        .is_enabled(plugin::BLACKBOARD_PLUGIN_ID)
+        .is_capability_available(plugin::BLACKBOARD_CAPABILITY)
         .await
     {
         respond_error(stream, 404, "Blackboard is disabled on this node").await?;
@@ -46,8 +46,8 @@ async fn handle_feed(stream: &mut TcpStream, state: &MeshApi, path: &str) -> any
             .unwrap_or(0),
     };
     match plugin_manager
-        .call_tool(
-            plugin::BLACKBOARD_PLUGIN_ID,
+        .call_tool_by_capability(
+            plugin::BLACKBOARD_CAPABILITY,
             "feed",
             &serde_json::to_string(&request)?,
         )
@@ -77,7 +77,7 @@ async fn handle_feed(stream: &mut TcpStream, state: &MeshApi, path: &str) -> any
 async fn handle_search(stream: &mut TcpStream, state: &MeshApi, path: &str) -> anyhow::Result<()> {
     let plugin_manager = state.inner.lock().await.plugin_manager.clone();
     if !plugin_manager
-        .is_enabled(plugin::BLACKBOARD_PLUGIN_ID)
+        .is_capability_available(plugin::BLACKBOARD_CAPABILITY)
         .await
     {
         respond_error(stream, 404, "Blackboard is disabled on this node").await?;
@@ -103,8 +103,8 @@ async fn handle_search(stream: &mut TcpStream, state: &MeshApi, path: &str) -> a
             .unwrap_or(0),
     };
     match plugin_manager
-        .call_tool(
-            plugin::BLACKBOARD_PLUGIN_ID,
+        .call_tool_by_capability(
+            plugin::BLACKBOARD_CAPABILITY,
             "search",
             &serde_json::to_string(&request)?,
         )
@@ -137,7 +137,7 @@ async fn handle_post(stream: &mut TcpStream, state: &MeshApi, body: &str) -> any
         (inner.node.clone(), inner.plugin_manager.clone())
     };
     if !plugin_manager
-        .is_enabled(plugin::BLACKBOARD_PLUGIN_ID)
+        .is_capability_available(plugin::BLACKBOARD_CAPABILITY)
         .await
     {
         respond_error(stream, 404, "Blackboard is disabled on this node").await?;
@@ -157,8 +157,8 @@ async fn handle_post(stream: &mut TcpStream, state: &MeshApi, body: &str) -> any
                     peer_id: node.id().fmt_short().to_string(),
                 };
                 match plugin_manager
-                    .call_tool(
-                        plugin::BLACKBOARD_PLUGIN_ID,
+                    .call_tool_by_capability(
+                        plugin::BLACKBOARD_CAPABILITY,
                         "post",
                         &serde_json::to_string(&request)?,
                     )

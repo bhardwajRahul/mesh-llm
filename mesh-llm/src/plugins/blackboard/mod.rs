@@ -7,8 +7,8 @@ pub mod mcp;
 
 use anyhow::Result;
 use mesh_llm_plugin::{
-    json_schema_for, json_schema_tool, json_string, plugin_server_info, PluginMetadata,
-    PluginRuntime, PluginStartupPolicy, SimplePlugin, ToolRouter,
+    capability, http_get, http_post, json_schema_tool, mcp_tool, plugin_server_info,
+    PluginMetadata, PluginRuntime, PluginStartupPolicy, SimplePlugin, ToolRouter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -371,75 +371,19 @@ fn tool_router(store: BlackboardStore) -> ToolRouter {
 }
 
 fn blackboard_manifest() -> mesh_llm_plugin::proto::PluginManifest {
-    mesh_llm_plugin::proto::PluginManifest {
-        mcp_tools: vec![
-            mesh_llm_plugin::proto::McpToolManifest {
-                name: "feed".into(),
-                description: "Read recent blackboard messages.".into(),
-                input_schema_json: json_string(&json_schema_for::<FeedRequest>())
-                    .unwrap_or_else(|_| "{}".into()),
-                output_schema_json: None,
-                title: Some("Blackboard Feed".into()),
-            },
-            mesh_llm_plugin::proto::McpToolManifest {
-                name: "search".into(),
-                description: "Search blackboard messages by keyword.".into(),
-                input_schema_json: json_string(&json_schema_for::<SearchRequest>())
-                    .unwrap_or_else(|_| "{}".into()),
-                output_schema_json: None,
-                title: Some("Blackboard Search".into()),
-            },
-            mesh_llm_plugin::proto::McpToolManifest {
-                name: "post".into(),
-                description: "Post a new blackboard message.".into(),
-                input_schema_json: json_string(&json_schema_for::<PostRequest>())
-                    .unwrap_or_else(|_| "{}".into()),
-                output_schema_json: None,
-                title: Some("Post Blackboard Message".into()),
-            },
-        ],
-        http_bindings: vec![
-            mesh_llm_plugin::proto::HttpBindingManifest {
-                binding_id: "feed".into(),
-                method: mesh_llm_plugin::proto::HttpMethod::Get as i32,
-                path: "/feed".into(),
-                operation_name: Some("feed".into()),
-                request_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                response_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                request_schema_json: Some(
-                    json_string(&json_schema_for::<FeedRequest>()).unwrap_or_else(|_| "{}".into()),
-                ),
-                response_schema_json: None,
-            },
-            mesh_llm_plugin::proto::HttpBindingManifest {
-                binding_id: "search".into(),
-                method: mesh_llm_plugin::proto::HttpMethod::Get as i32,
-                path: "/search".into(),
-                operation_name: Some("search".into()),
-                request_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                response_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                request_schema_json: Some(
-                    json_string(&json_schema_for::<SearchRequest>())
-                        .unwrap_or_else(|_| "{}".into()),
-                ),
-                response_schema_json: None,
-            },
-            mesh_llm_plugin::proto::HttpBindingManifest {
-                binding_id: "post".into(),
-                method: mesh_llm_plugin::proto::HttpMethod::Post as i32,
-                path: "/post".into(),
-                operation_name: Some("post".into()),
-                request_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                response_body_mode: mesh_llm_plugin::proto::HttpBodyMode::Buffered as i32,
-                request_schema_json: Some(
-                    json_string(&json_schema_for::<PostRequest>()).unwrap_or_else(|_| "{}".into()),
-                ),
-                response_schema_json: None,
-            },
-        ],
-        capabilities: vec!["channel:blackboard".into()],
-        ..Default::default()
-    }
+    mesh_llm_plugin::plugin_manifest![
+        capability("channel:blackboard"),
+        capability("blackboard.v1"),
+        mcp_tool::<FeedRequest>("feed", "Read recent blackboard messages.")
+            .title("Blackboard Feed"),
+        mcp_tool::<SearchRequest>("search", "Search blackboard messages by keyword.")
+            .title("Blackboard Search"),
+        mcp_tool::<PostRequest>("post", "Post a new blackboard message.")
+            .title("Post Blackboard Message"),
+        http_get("/feed", "feed").request_schema::<FeedRequest>(),
+        http_get("/search", "search").request_schema::<SearchRequest>(),
+        http_post("/post", "post").request_schema::<PostRequest>(),
+    ]
 }
 
 fn build_blackboard_plugin(name: String) -> SimplePlugin {
@@ -462,7 +406,7 @@ fn build_blackboard_plugin(name: String) -> SimplePlugin {
                 ),
             ),
         )
-        .with_capabilities(vec!["channel:blackboard".into()])
+        .with_capabilities(vec!["channel:blackboard".into(), "blackboard.v1".into()])
         .with_manifest(blackboard_manifest())
         .with_startup_policy(PluginStartupPolicy::PrivateMeshOnly),
     )
@@ -740,6 +684,27 @@ mod tests {
             let item = BlackboardItem::new("alice".into(), "abc".into(), format!("hello {i}"));
             assert!(ids.insert(item.id), "duplicate id generated: {}", item.id);
         }
+    }
+
+    #[test]
+    fn manifest_declares_blackboard_capability_and_bindings() {
+        let manifest = blackboard_manifest();
+        assert!(manifest
+            .capabilities
+            .iter()
+            .any(|cap| cap == "blackboard.v1"));
+        assert!(manifest
+            .http_bindings
+            .iter()
+            .any(|binding| binding.binding_id == "feed"));
+        assert!(manifest
+            .http_bindings
+            .iter()
+            .any(|binding| binding.binding_id == "search"));
+        assert!(manifest
+            .http_bindings
+            .iter()
+            .any(|binding| binding.binding_id == "post"));
     }
 
     #[tokio::test]

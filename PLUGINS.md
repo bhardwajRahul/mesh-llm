@@ -183,38 +183,23 @@ The manifest is the source of truth for host projections.
 
 The primary design goal is very low boilerplate.
 
-A plugin should look roughly like this:
+The current author-facing manifest DSL is builder-based:
 
 ```rust
-plugin! {
-    name: "blackboard",
-    version: env!("CARGO_PKG_VERSION"),
-
-    mcp: [
-        tool("feed", feed)
-            .description("Read recent blackboard messages")
-            .input::<FeedArgs>()
-            .output::<Vec<FeedItem>>()
-            .http_get("/feed"),
-
-        tool("post", post)
-            .description("Post a blackboard message")
-            .input::<PostArgs>()
-            .output::<PostResult>()
-            .http_post("/post"),
-
-        resource("blackboard://snapshot", snapshot)
-            .description("Current blackboard snapshot"),
-
-        prompt("status_brief", status_brief)
-            .description("Create a short status brief from recent blackboard activity"),
-    ],
-
-    capabilities: [
+fn manifest() -> mesh_llm_plugin::proto::PluginManifest {
+    mesh_llm_plugin::plugin_manifest![
         capability("mesh-blackboard.v1"),
-    ],
+        mcp_tool::<FeedArgs>("feed", "Read recent blackboard messages")
+            .title("Blackboard Feed"),
+        mcp_tool::<PostArgs>("post", "Post a blackboard message")
+            .title("Post Blackboard Message"),
+        http_get("/feed", "feed").request_schema::<FeedArgs>(),
+        http_post("/post", "post").request_schema::<PostArgs>(),
+    ]
 }
 ```
+
+This manifest DSL is the stable base layer. A future `plugin! { ... }` wrapper can compile down to the same manifest builders.
 
 The plugin author declares services and writes normal typed handlers. The runtime and `stapler` handle:
 
@@ -263,7 +248,7 @@ Some services already speak a protocol that `mesh-llm` knows how to use.
 Examples:
 
 - a local OpenAI-compatible inference server
-- an external MCP server reachable over stdio, Unix socket, named pipe, or TCP
+- an external MCP server reachable over stdio, streamable HTTP, Unix socket, named pipe, or TCP
 - a plugin-hosted inference runtime such as an MLX-backed local server
 
 In these cases, the plugin should not need to proxy all traffic through itself. It should be able to register the service with the host and remain the control-plane owner for:
@@ -277,35 +262,30 @@ For plugin-hosted endpoints, the same contract still applies. The only differenc
 
 ### Endpoint DSL
 
-The intended plugin author experience is:
+The current builder form is:
 
 ```rust
-plugin! {
-    name: "local-services",
-    version: env!("CARGO_PKG_VERSION"),
-
-    endpoints: [
-        inference_endpoint("mlx")
-            .protocol(openai_compatible())
-            .transport(http("http://127.0.0.1:8091"))
-            .models(list_models)
-            .health(check_mlx)
-            .lifecycle(start_mlx, stop_mlx),
-
-        mcp_endpoint("filesystem")
-            .stdio(command("npx").arg("-y").arg("@modelcontextprotocol/server-filesystem"))
-            .namespace("filesystem")
-            .health(check_filesystem_mcp),
-
-        mcp_endpoint("notes")
-            .transport(unix_socket("/tmp/notes-mcp.sock"))
-            .namespace("notes")
-            .health(check_notes_mcp),
-    ],
+fn manifest() -> mesh_llm_plugin::proto::PluginManifest {
+    mesh_llm_plugin::plugin_manifest![
+        openai_http_inference_endpoint("mlx", "http://127.0.0.1:8091")
+            .managed_by_plugin(true),
+        mcp_stdio_endpoint("filesystem", "npx")
+            .arg("-y")
+            .arg("@modelcontextprotocol/server-filesystem")
+            .namespace("filesystem"),
+        mcp_unix_socket_endpoint("notes", "/tmp/notes-mcp.sock")
+            .namespace("notes"),
+        mcp_http_endpoint("remote", "http://127.0.0.1:9000/mcp")
+            .namespace("remote"),
+        mcp_tcp_endpoint("debug", "127.0.0.1:9100")
+            .namespace("debug"),
+    ]
 }
 ```
 
-For very common cases, a fully declarative form should also be supported:
+That builder layer is what bundled plugins use today. A higher-level `plugin! { endpoints: [...] }` macro can layer on later without changing the host contract.
+
+For very common cases, a more declarative wrapper can still sit on top:
 
 ```rust
 plugin! {

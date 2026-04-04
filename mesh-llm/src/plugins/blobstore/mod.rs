@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use mesh_llm_plugin::{
-    async_trait, json_response, json_schema_tool, list_tools, parse_rpc_params,
+    async_trait, capability, json_response, json_schema_tool, list_tools, parse_rpc_params,
     structured_tool_result, Plugin, PluginContext, PluginError, PluginResult, PluginRpcResult,
     PluginRuntime, ToolCallRequest,
 };
@@ -26,10 +26,10 @@ const DEFAULT_USES_REMAINING: u32 = 3;
 const MAX_OBJECT_BYTES: usize = 50 * 1024 * 1024;
 
 fn blobstore_manifest() -> mesh_llm_plugin::proto::PluginManifest {
-    mesh_llm_plugin::proto::PluginManifest {
-        capabilities: vec!["internal:blobstore".into(), "object-store.v1".into()],
-        ..Default::default()
-    }
+    mesh_llm_plugin::plugin_manifest![
+        capability("internal:blobstore"),
+        capability("object-store.v1"),
+    ]
 }
 
 fn now_secs() -> u64 {

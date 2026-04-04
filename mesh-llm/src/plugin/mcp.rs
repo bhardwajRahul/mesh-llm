@@ -13,12 +13,15 @@ use rmcp::{
         SubscribeRequestParams, UnsubscribeRequestParams,
     },
     service::{NotificationContext, Peer, RequestContext, RunningService},
-    transport::{io::stdio, TokioChildProcess},
+    transport::{io::stdio, StreamableHttpClientTransport, TokioChildProcess},
     ErrorData, RoleClient, RoleServer, ServerHandler, ServiceExt,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -74,31 +77,56 @@ struct ResourceRef {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum ExternalMcpTransport {
+    Stdio { command: String, args: Vec<String> },
+    Http { uri: String },
+    Tcp { address: String },
+    UnixSocket { path: String },
+    NamedPipe { name: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ExternalMcpEndpoint {
     key: String,
     plugin_name: String,
     endpoint_id: String,
-    command: String,
-    args: Vec<String>,
+    transport: ExternalMcpTransport,
     namespace_prefix: String,
 }
 
 impl ExternalMcpEndpoint {
     fn from_summary(summary: PluginEndpointSummary) -> Option<Self> {
-        if !summary.available || summary.kind != "mcp" || summary.transport_kind != "stdio" {
+        if !summary.available || summary.kind != "mcp" {
             return None;
         }
-        let command = summary.address?;
         let local_namespace = summary
             .namespace
             .unwrap_or_else(|| summary.endpoint_id.clone());
         let plugin_name = summary.plugin_name;
+        let transport = match summary.transport_kind.as_str() {
+            "stdio" => ExternalMcpTransport::Stdio {
+                command: summary.address?,
+                args: summary.args,
+            },
+            "http" => ExternalMcpTransport::Http {
+                uri: summary.address?,
+            },
+            "tcp" => ExternalMcpTransport::Tcp {
+                address: summary.address?,
+            },
+            "unix_socket" => ExternalMcpTransport::UnixSocket {
+                path: summary.address?,
+            },
+            "named_pipe" => ExternalMcpTransport::NamedPipe {
+                name: summary.address?,
+            },
+            _ => return None,
+        };
         Some(Self {
             key: format!("{}:{}", plugin_name, summary.endpoint_id),
             plugin_name: plugin_name.clone(),
             endpoint_id: summary.endpoint_id,
-            command,
-            args: summary.args,
+            transport,
             namespace_prefix: format!("{}.{}", plugin_name, local_namespace),
         })
     }
@@ -124,6 +152,16 @@ impl ExternalMcpEndpoint {
             urlencoding::encode(original_uri_template)
         )
     }
+
+    fn transport_label(&self) -> String {
+        match &self.transport {
+            ExternalMcpTransport::Stdio { command, .. } => command.clone(),
+            ExternalMcpTransport::Http { uri } => uri.clone(),
+            ExternalMcpTransport::Tcp { address } => address.clone(),
+            ExternalMcpTransport::UnixSocket { path } => path.clone(),
+            ExternalMcpTransport::NamedPipe { name } => name.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -134,18 +172,80 @@ struct ExternalMcpClient {
 
 impl ExternalMcpClient {
     async fn connect(endpoint: &ExternalMcpEndpoint) -> Result<Self> {
-        let mut command = Command::new(&endpoint.command);
-        command.args(&endpoint.args);
-        let transport = TokioChildProcess::new(command).with_context(|| {
+        let running = match &endpoint.transport {
+            ExternalMcpTransport::Stdio { command, args } => {
+                let mut child = Command::new(command);
+                child.args(args);
+                let transport = TokioChildProcess::new(child).with_context(|| {
+                    format!(
+                        "Spawn external MCP endpoint '{}:{}' with command '{}'",
+                        endpoint.plugin_name, endpoint.endpoint_id, command
+                    )
+                })?;
+                ().serve(transport).await.map_err(anyhow::Error::from)
+            }
+            ExternalMcpTransport::Http { uri } => {
+                let transport = StreamableHttpClientTransport::from_uri(uri.clone());
+                ().serve(transport).await.map_err(anyhow::Error::from)
+            }
+            ExternalMcpTransport::Tcp { address } => {
+                let stream = TcpStream::connect(address).await.with_context(|| {
+                    format!(
+                        "Connect TCP external MCP endpoint '{}:{}' at '{}'",
+                        endpoint.plugin_name, endpoint.endpoint_id, address
+                    )
+                })?;
+                ().serve(stream).await.map_err(anyhow::Error::from)
+            }
+            ExternalMcpTransport::UnixSocket { path } => {
+                #[cfg(unix)]
+                {
+                    let stream = UnixStream::connect(path).await.with_context(|| {
+                        format!(
+                            "Connect Unix socket MCP endpoint '{}:{}' at '{}'",
+                            endpoint.plugin_name, endpoint.endpoint_id, path
+                        )
+                    })?;
+                    ().serve(stream).await.map_err(anyhow::Error::from)
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(anyhow!(
+                        "Unix socket MCP endpoint '{}:{}' is unsupported on this platform",
+                        endpoint.plugin_name,
+                        endpoint.endpoint_id
+                    ))
+                }
+            }
+            ExternalMcpTransport::NamedPipe { name: _ } => {
+                #[cfg(windows)]
+                {
+                    let client = tokio::net::windows::named_pipe::ClientOptions::new()
+                        .open(name)
+                        .with_context(|| {
+                            format!(
+                                "Connect named pipe MCP endpoint '{}:{}' at '{}'",
+                                endpoint.plugin_name, endpoint.endpoint_id, name
+                            )
+                        })?;
+                    ().serve(client).await.map_err(anyhow::Error::from)
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(anyhow!(
+                        "Named pipe MCP endpoint '{}:{}' is unsupported on this platform",
+                        endpoint.plugin_name,
+                        endpoint.endpoint_id
+                    ))
+                }
+            }
+        }
+        .with_context(|| {
             format!(
-                "Spawn external MCP endpoint '{}:{}' with command '{}'",
-                endpoint.plugin_name, endpoint.endpoint_id, endpoint.command
-            )
-        })?;
-        let running = ().serve(transport).await.with_context(|| {
-            format!(
-                "Connect to external MCP endpoint '{}:{}'",
-                endpoint.plugin_name, endpoint.endpoint_id
+                "Connect to external MCP endpoint '{}:{}' via '{}'",
+                endpoint.plugin_name,
+                endpoint.endpoint_id,
+                endpoint.transport_label()
             )
         })?;
         let peer = running.peer().clone();
@@ -1431,6 +1531,7 @@ mod tests {
     };
     use rmcp::service::RequestContext;
     use serde_json::json;
+    use std::path::PathBuf;
 
     struct NoopBridge;
 
@@ -1583,6 +1684,43 @@ mod tests {
         })
     }
 
+    async fn spawn_fake_external_tcp_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = FakeExternalMcpServer
+                .serve(stream)
+                .await
+                .unwrap()
+                .waiting()
+                .await;
+        });
+        address
+    }
+
+    #[cfg(unix)]
+    async fn spawn_fake_external_unix_endpoint() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("mesh-llm-mcp-{}.sock", rand::random::<u64>()));
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = FakeExternalMcpServer
+                .serve(stream)
+                .await
+                .unwrap()
+                .waiting()
+                .await;
+        });
+        path
+    }
+
     async fn test_server_with_external_endpoint() -> PluginMcpServer {
         let plugin_manager = PluginManager::for_test_bridge(&[], Arc::new(NoopBridge));
         plugin_manager
@@ -1618,8 +1756,10 @@ mod tests {
             key: "adapter:notes".into(),
             plugin_name: "adapter".into(),
             endpoint_id: "notes".into(),
-            command: "fake".into(),
-            args: Vec::new(),
+            transport: ExternalMcpTransport::Stdio {
+                command: "fake".into(),
+                args: Vec::new(),
+            },
             namespace_prefix: "adapter.notes".into(),
         };
         assert_eq!(endpoint.canonical_name("echo"), "adapter.notes.echo");
@@ -1692,5 +1832,92 @@ mod tests {
 
         let tools = server.discover_tools().await.unwrap();
         assert!(!tools.contains_key("adapter.notes.echo"));
+    }
+
+    #[tokio::test]
+    async fn tcp_external_mcp_endpoint_is_aggregated() {
+        let address = spawn_fake_external_tcp_endpoint().await;
+        let plugin_manager = PluginManager::for_test_bridge(&[], Arc::new(NoopBridge));
+        plugin_manager
+            .set_test_endpoints(vec![PluginEndpointSummary {
+                plugin_name: "adapter".into(),
+                plugin_status: "running".into(),
+                endpoint_id: "notes".into(),
+                state: "healthy".into(),
+                available: true,
+                kind: "mcp".into(),
+                transport_kind: "tcp".into(),
+                protocol: None,
+                address: Some(address),
+                args: Vec::new(),
+                namespace: Some("notes".into()),
+                supports_streaming: false,
+                managed_by_plugin: false,
+                detail: None,
+                models: Vec::new(),
+            }])
+            .await;
+        let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
+        let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("adapter.notes.echo"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_socket_external_mcp_endpoint_is_aggregated() {
+        let path = spawn_fake_external_unix_endpoint().await;
+        let plugin_manager = PluginManager::for_test_bridge(&[], Arc::new(NoopBridge));
+        plugin_manager
+            .set_test_endpoints(vec![PluginEndpointSummary {
+                plugin_name: "adapter".into(),
+                plugin_status: "running".into(),
+                endpoint_id: "notes".into(),
+                state: "healthy".into(),
+                available: true,
+                kind: "mcp".into(),
+                transport_kind: "unix_socket".into(),
+                protocol: None,
+                address: Some(path.display().to_string()),
+                args: Vec::new(),
+                namespace: Some("notes".into()),
+                supports_streaming: false,
+                managed_by_plugin: false,
+                detail: None,
+                models: Vec::new(),
+            }])
+            .await;
+        let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
+        let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("adapter.notes.echo"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_external_mcp_endpoint_summary_is_recognized() {
+        let endpoint = ExternalMcpEndpoint::from_summary(PluginEndpointSummary {
+            plugin_name: "adapter".into(),
+            plugin_status: "running".into(),
+            endpoint_id: "remote".into(),
+            state: "healthy".into(),
+            available: true,
+            kind: "mcp".into(),
+            transport_kind: "http".into(),
+            protocol: Some("streamable_http".into()),
+            address: Some("http://127.0.0.1:9000/mcp".into()),
+            args: Vec::new(),
+            namespace: Some("remote".into()),
+            supports_streaming: true,
+            managed_by_plugin: false,
+            detail: None,
+            models: Vec::new(),
+        })
+        .expect("http endpoint");
+        assert_eq!(endpoint.canonical_name("echo"), "adapter.remote.echo");
+        assert_eq!(
+            endpoint.transport,
+            ExternalMcpTransport::Http {
+                uri: "http://127.0.0.1:9000/mcp".into()
+            }
+        );
     }
 }

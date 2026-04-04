@@ -29,7 +29,7 @@ url = "2"
 urlencoding = "2"
 libc = "0.2.183"
 regex-lite = "0.1"
-rmcp = { version = "1.2", features = ["client", "server", "transport-child-process", "transport-io"] }
+rmcp = { version = "1.2", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 prost = "0.14"
 toml = "0.9"

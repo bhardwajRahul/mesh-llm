@@ -1,6 +1,7 @@
 use anyhow::Result;
 use mesh_llm_plugin::{
-    plugin_server_info, PluginMetadata, PluginRuntime, PluginStartupPolicy, SimplePlugin,
+    capability, openai_http_inference_endpoint, plugin_server_info, PluginMetadata, PluginRuntime,
+    PluginStartupPolicy, SimplePlugin,
 };
 
 const DEFAULT_LEMONADE_BASE_URL: &str = "http://localhost:8000/api/v1";
@@ -14,25 +15,11 @@ fn lemonade_base_url() -> String {
 }
 
 fn lemonade_manifest(base_url: &str) -> mesh_llm_plugin::proto::PluginManifest {
-    mesh_llm_plugin::proto::PluginManifest {
-        endpoints: vec![mesh_llm_plugin::proto::EndpointManifest {
-            endpoint_id: "lemonade".into(),
-            kind: mesh_llm_plugin::proto::EndpointKind::Inference as i32,
-            transport_kind: mesh_llm_plugin::proto::EndpointTransportKind::EndpointTransportHttp
-                as i32,
-            protocol: Some("openai_compatible".into()),
-            address: Some(base_url.to_string()),
-            args: Vec::new(),
-            namespace: None,
-            supports_streaming: true,
-            managed_by_plugin: false,
-        }],
-        capabilities: vec![
-            "endpoint:inference".into(),
-            "endpoint:inference/openai_compatible".into(),
-        ],
-        ..Default::default()
-    }
+    mesh_llm_plugin::plugin_manifest![
+        capability("endpoint:inference"),
+        capability("endpoint:inference/openai_compatible"),
+        openai_http_inference_endpoint("lemonade", base_url).managed_by_plugin(false),
+    ]
 }
 
 fn build_lemonade_plugin(name: String) -> SimplePlugin {

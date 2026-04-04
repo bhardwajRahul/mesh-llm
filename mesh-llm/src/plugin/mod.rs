@@ -38,6 +38,7 @@ use mesh_llm_plugin::MeshVisibility;
 pub const BLACKBOARD_PLUGIN_ID: &str = "blackboard";
 pub const BLOBSTORE_PLUGIN_ID: &str = "blobstore";
 pub const LEMONADE_PLUGIN_ID: &str = "lemonade";
+pub const BLACKBOARD_CAPABILITY: &str = "blackboard.v1";
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -591,6 +592,28 @@ impl PluginManager {
             .provider_for_capability(capability)
             .await?
             .filter(|provider| provider.available))
+    }
+
+    pub async fn is_capability_available(&self, capability: &str) -> bool {
+        self.available_provider_for_capability(capability)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    pub async fn call_tool_by_capability(
+        &self,
+        capability: &str,
+        tool_name: &str,
+        payload_json: &str,
+    ) -> Result<ToolCallResult> {
+        let provider = self
+            .available_provider_for_capability(capability)
+            .await?
+            .ok_or_else(|| anyhow!("No provider for capability '{capability}'"))?;
+        self.call_tool(&provider.plugin_name, tool_name, payload_json)
+            .await
     }
 
     pub async fn mcp_request<T, P>(&self, plugin_name: &str, method: &str, params: P) -> Result<T>
