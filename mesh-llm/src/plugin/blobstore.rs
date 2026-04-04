@@ -1,7 +1,9 @@
-use super::{PluginManager, BLOBSTORE_PLUGIN_ID};
+use super::PluginManager;
 use anyhow::{bail, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub const OBJECT_STORE_CAPABILITY: &str = "object-store.v1";
 
 pub const PUT_REQUEST_OBJECT_METHOD: &str = "blobstore/put_request_object";
 pub const GET_REQUEST_OBJECT_METHOD: &str = "blobstore/get_request_object";
@@ -83,14 +85,27 @@ where
     P: Serialize,
 {
     let arguments_json = serde_json::to_string(request)?;
+    let provider = plugin_manager
+        .available_provider_for_capability(OBJECT_STORE_CAPABILITY)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("No provider for capability '{OBJECT_STORE_CAPABILITY}'"))?;
     let result = plugin_manager
-        .call_tool(BLOBSTORE_PLUGIN_ID, tool_name, &arguments_json)
+        .call_tool(&provider.plugin_name, tool_name, &arguments_json)
         .await?;
     if result.is_error {
         bail!("{}", result.content_json);
     }
     serde_json::from_str(&result.content_json)
         .map_err(|err| anyhow::anyhow!("Decode blobstore tool result for '{tool_name}': {err}"))
+}
+
+pub async fn object_store_available(plugin_manager: &PluginManager) -> bool {
+    matches!(
+        plugin_manager
+            .available_provider_for_capability(OBJECT_STORE_CAPABILITY)
+            .await,
+        Ok(Some(_))
+    )
 }
 
 #[allow(dead_code)]

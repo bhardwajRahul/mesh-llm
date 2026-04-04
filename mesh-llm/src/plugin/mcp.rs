@@ -1665,4 +1665,32 @@ mod tests {
             Some(json!({"echo": "hello", "tool": "echo"}))
         );
     }
+
+    #[tokio::test]
+    async fn unavailable_external_mcp_endpoint_is_skipped_from_discovery() {
+        let plugin_manager = PluginManager::for_test_bridge(&[], Arc::new(NoopBridge));
+        plugin_manager
+            .set_test_endpoints(vec![PluginEndpointSummary {
+                plugin_name: "adapter".into(),
+                plugin_status: "running".into(),
+                endpoint_id: "notes".into(),
+                state: "unhealthy".into(),
+                available: false,
+                kind: "mcp".into(),
+                transport_kind: "stdio".into(),
+                protocol: None,
+                address: Some("fake-external".into()),
+                args: Vec::new(),
+                namespace: Some("notes".into()),
+                supports_streaming: false,
+                managed_by_plugin: false,
+                detail: Some("warming".into()),
+                models: Vec::new(),
+            }])
+            .await;
+        let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
+
+        let tools = server.discover_tools().await.unwrap();
+        assert!(!tools.contains_key("adapter.notes.echo"));
+    }
 }

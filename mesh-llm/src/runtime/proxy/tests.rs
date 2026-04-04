@@ -1,6 +1,7 @@
 use super::*;
 use crate::plugin;
 use crate::plugins::blobstore::BlobStore;
+use base64::Engine;
 use rmcp::model::ErrorCode;
 use serde_json::json;
 use std::collections::HashMap;
@@ -59,6 +60,7 @@ async fn spawn_api_proxy_test_harness_with_plugin_manager(
 
 #[derive(Clone)]
 struct BlobstoreTestBridge {
+    plugin_name: String,
     store: BlobStore,
 }
 
@@ -108,9 +110,10 @@ impl plugin::PluginRpcBridge for BlobstoreTestBridge {
         method: String,
         params_json: String,
     ) -> plugin::BridgeFuture<Result<plugin::RpcResult, plugin::proto::ErrorResponse>> {
+        let expected_plugin_name = self.plugin_name.clone();
         let store = self.store.clone();
         Box::pin(async move {
-            if plugin_name != plugin::BLOBSTORE_PLUGIN_ID {
+            if plugin_name != expected_plugin_name {
                 return Err(Self::error_response(format!(
                     "Unsupported test plugin '{}'",
                     plugin_name
@@ -239,14 +242,35 @@ fn temp_blobstore_root(name: &str) -> std::path::PathBuf {
 }
 
 async fn start_blobstore_plugin_manager() -> (plugin::PluginManager, std::path::PathBuf) {
+    start_blobstore_plugin_manager_for(
+        plugin::BLOBSTORE_PLUGIN_ID,
+        vec!["internal:blobstore".into(), "object-store.v1".into()],
+    )
+    .await
+}
+
+async fn start_blobstore_plugin_manager_for(
+    plugin_name: &str,
+    capabilities: Vec<String>,
+) -> (plugin::PluginManager, std::path::PathBuf) {
     let root = temp_blobstore_root("blobstore");
     let bridge = BlobstoreTestBridge {
+        plugin_name: plugin_name.to_string(),
         store: BlobStore::new(root.clone()),
     };
-    (
-        plugin::PluginManager::for_test_bridge(&[plugin::BLOBSTORE_PLUGIN_ID], Arc::new(bridge)),
-        root,
-    )
+    let plugin_manager = plugin::PluginManager::for_test_bridge(&[plugin_name], Arc::new(bridge));
+    let mut manifests = HashMap::new();
+    manifests.insert(
+        plugin_name.to_string(),
+        mesh_llm_plugin::proto::PluginManifest {
+            capabilities,
+            ..Default::default()
+        },
+    );
+    plugin_manager
+        .set_test_manifests(manifests.into_iter().collect())
+        .await;
+    (plugin_manager, root)
 }
 
 async fn start_inference_endpoint_plugin_manager(
@@ -612,6 +636,30 @@ async fn test_api_proxy_rewrites_image_blob_url_to_data_url() {
 
     proxy_handle.abort();
     let _ = upstream_handle.await;
+    let _ = std::fs::remove_dir_all(blobstore_root);
+}
+
+#[tokio::test]
+async fn test_blobstore_helper_resolves_object_store_capability() {
+    let (plugin_manager, blobstore_root) =
+        start_blobstore_plugin_manager_for("alt-store", vec!["object-store.v1".into()]).await;
+
+    let response = plugin::blobstore::put_request_object(
+        &plugin_manager,
+        plugin::blobstore::PutRequestObjectRequest {
+            request_id: "req-capability".into(),
+            mime_type: "text/plain".into(),
+            file_name: Some("note.txt".into()),
+            bytes_base64: base64::engine::general_purpose::STANDARD.encode("hello"),
+            expires_in_secs: Some(60),
+            uses_remaining: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.request_id, "req-capability");
+
     let _ = std::fs::remove_dir_all(blobstore_root);
 }
 

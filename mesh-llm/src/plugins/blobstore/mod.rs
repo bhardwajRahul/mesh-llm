@@ -27,7 +27,7 @@ const MAX_OBJECT_BYTES: usize = 50 * 1024 * 1024;
 
 fn blobstore_manifest() -> mesh_llm_plugin::proto::PluginManifest {
     mesh_llm_plugin::proto::PluginManifest {
-        capabilities: vec!["internal:blobstore".into()],
+        capabilities: vec!["internal:blobstore".into(), "object-store.v1".into()],
         ..Default::default()
     }
 }
@@ -499,7 +499,7 @@ impl Plugin for BlobstorePlugin {
     }
 
     fn capabilities(&self) -> Vec<String> {
-        vec!["internal:blobstore".into()]
+        vec!["internal:blobstore".into(), "object-store.v1".into()]
     }
 
     fn manifest(&self) -> Option<mesh_llm_plugin::proto::PluginManifest> {

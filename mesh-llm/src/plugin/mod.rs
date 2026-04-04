@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use url::Url;
 
@@ -41,6 +42,8 @@ pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
+const ENDPOINT_STARTUP_GRACE_SECS: u64 = 30;
+const ENDPOINT_FAILURE_THRESHOLD: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub enum PluginMeshEvent {
@@ -171,6 +174,13 @@ struct EndpointHealthRecord {
 }
 
 #[derive(Clone, Debug)]
+struct EndpointHealthState {
+    record: EndpointHealthRecord,
+    first_checked_at: Instant,
+    consecutive_failures: u32,
+}
+
+#[derive(Clone, Debug)]
 pub struct InferenceEndpointRoute {
     pub plugin_name: String,
     pub endpoint_id: String,
@@ -188,7 +198,7 @@ pub struct PluginManager {
 struct PluginManagerInner {
     plugins: BTreeMap<String, ExternalPlugin>,
     inactive: BTreeMap<String, PluginSummary>,
-    endpoint_health: Arc<Mutex<BTreeMap<String, EndpointHealthRecord>>>,
+    endpoint_health: Arc<Mutex<BTreeMap<String, EndpointHealthState>>>,
     rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
     #[cfg(test)]
     bridged_plugins: BTreeSet<String>,
@@ -196,6 +206,8 @@ struct PluginManagerInner {
     test_endpoints: Arc<Mutex<Vec<PluginEndpointSummary>>>,
     #[cfg(test)]
     test_inference_endpoints: Arc<Mutex<Vec<InferenceEndpointRoute>>>,
+    #[cfg(test)]
+    test_manifests: Arc<Mutex<BTreeMap<String, proto::PluginManifest>>>,
 }
 
 impl PluginManager {
@@ -276,6 +288,8 @@ impl PluginManager {
                 test_endpoints: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(test)]
                 test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
+                #[cfg(test)]
+                test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         };
         manager.start_supervisor();
@@ -296,11 +310,36 @@ impl PluginManager {
                     .collect(),
                 test_endpoints: Arc::new(Mutex::new(Vec::new())),
                 test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
+                test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         }
     }
 
     pub async fn list(&self) -> Vec<PluginSummary> {
+        #[cfg(test)]
+        if self.inner.plugins.is_empty() && self.inner.inactive.is_empty() {
+            let manifests = self.inner.test_manifests.lock().await.clone();
+            if !manifests.is_empty() {
+                let mut summaries = manifests
+                    .into_iter()
+                    .map(|(name, manifest)| PluginSummary {
+                        name,
+                        kind: "bridge".into(),
+                        enabled: true,
+                        status: "running".into(),
+                        version: None,
+                        capabilities: manifest.capabilities.clone(),
+                        command: None,
+                        args: Vec::new(),
+                        tools: Vec::new(),
+                        manifest: Some(plugin_manifest_overview(&manifest)),
+                        error: None,
+                    })
+                    .collect::<Vec<_>>();
+                summaries.sort_by(|a, b| a.name.cmp(&b.name));
+                return summaries;
+            }
+        }
         let mut summaries =
             Vec::with_capacity(self.inner.plugins.len() + self.inner.inactive.len());
         for plugin in self.inner.plugins.values() {
@@ -334,8 +373,8 @@ impl PluginManager {
             for endpoint in manifest.endpoints {
                 let health = endpoint_health
                     .get(&endpoint_key(&summary.name, &endpoint.endpoint_id))
-                    .cloned()
-                    .unwrap_or_else(|| endpoint_state_from_plugin_status(&summary));
+                    .map(|state| state.record.clone())
+                    .unwrap_or_else(|| endpoint_record_from_plugin_status(&summary));
                 endpoints.push(PluginEndpointSummary {
                     plugin_name: summary.name.clone(),
                     plugin_status: summary.status.clone(),
@@ -372,6 +411,11 @@ impl PluginManager {
     #[cfg(test)]
     pub async fn set_test_inference_endpoints(&self, endpoints: Vec<InferenceEndpointRoute>) {
         *self.inner.test_inference_endpoints.lock().await = endpoints;
+    }
+
+    #[cfg(test)]
+    pub async fn set_test_manifests(&self, manifests: BTreeMap<String, proto::PluginManifest>) {
+        *self.inner.test_manifests.lock().await = manifests;
     }
 
     pub async fn is_enabled(&self, name: &str) -> bool {
@@ -484,7 +528,7 @@ impl PluginManager {
                 continue;
             };
 
-            let plugin_default = endpoint_state_from_plugin_status(&summary);
+            let plugin_default = endpoint_record_from_plugin_status(&summary);
             for capability in &manifest.capabilities {
                 providers.push(PluginCapabilityProvider {
                     capability: capability.clone(),
@@ -499,8 +543,8 @@ impl PluginManager {
             for endpoint in &manifest.endpoints {
                 let health = endpoint_health
                     .get(&endpoint_key(&summary.name, &endpoint.endpoint_id))
-                    .cloned()
-                    .unwrap_or_else(|| endpoint_state_from_plugin_status(&summary));
+                    .map(|state| state.record.clone())
+                    .unwrap_or_else(|| endpoint_record_from_plugin_status(&summary));
                 let endpoint_capabilities = endpoint_declared_capabilities(endpoint);
                 for capability in endpoint_capabilities {
                     providers.push(PluginCapabilityProvider {
@@ -537,6 +581,16 @@ impl PluginManager {
         Ok(providers
             .into_iter()
             .find(|provider| provider.capability == capability))
+    }
+
+    pub async fn available_provider_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<Option<PluginCapabilityProvider>> {
+        Ok(self
+            .provider_for_capability(capability)
+            .await?
+            .filter(|provider| provider.available))
     }
 
     pub async fn mcp_request<T, P>(&self, plugin_name: &str, method: &str, params: P) -> Result<T>
@@ -631,6 +685,17 @@ impl PluginManager {
 
     pub async fn manifest(&self, plugin_name: &str) -> Result<Option<proto::PluginManifest>> {
         if self.is_test_bridge_enabled(plugin_name) {
+            #[cfg(test)]
+            if let Some(manifest) = self
+                .inner
+                .test_manifests
+                .lock()
+                .await
+                .get(plugin_name)
+                .cloned()
+            {
+                return Ok(Some(manifest));
+            }
             bail!(
                 "Plugin '{}' does not expose a manifest in bridge mode",
                 plugin_name
@@ -866,15 +931,30 @@ impl PluginManager {
         };
 
         let manifest = self.manifest(plugin_name).await.ok().flatten();
-        let mut endpoint_states = BTreeMap::new();
         let Some(manifest) = manifest else {
             self.clear_plugin_endpoint_health(plugin_name).await;
             return Ok(());
         };
 
+        let now = Instant::now();
+        let prefix = format!("{plugin_name}:");
+        let previous = self
+            .inner
+            .endpoint_health
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(key, value)| {
+                key.strip_prefix(&prefix)
+                    .map(|endpoint_id| (endpoint_id.to_string(), value.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut endpoint_states = BTreeMap::new();
         for endpoint in manifest.endpoints {
-            let health = endpoint_health_for_summary(&summary, &endpoint).await;
-            endpoint_states.insert(endpoint_key(plugin_name, &endpoint.endpoint_id), health);
+            let key = endpoint.endpoint_id.clone();
+            let health =
+                endpoint_health_for_summary(&summary, &endpoint, previous.get(&key), now).await;
+            endpoint_states.insert(endpoint_key(plugin_name, &key), health);
         }
 
         let mut registry = self.inner.endpoint_health.lock().await;
@@ -920,8 +1000,8 @@ impl PluginManager {
                 };
                 let health = endpoint_health
                     .get(&endpoint_key(&summary.name, &endpoint.endpoint_id))
-                    .cloned()
-                    .unwrap_or_else(|| endpoint_state_from_plugin_status(&summary));
+                    .map(|state| state.record.clone())
+                    .unwrap_or_else(|| endpoint_record_from_plugin_status(&summary));
                 if !health.available {
                     continue;
                 }
@@ -1060,7 +1140,7 @@ fn endpoint_transport_kind_name(value: i32) -> &'static str {
     }
 }
 
-fn endpoint_state_from_plugin_status(summary: &PluginSummary) -> EndpointHealthRecord {
+fn endpoint_record_from_plugin_status(summary: &PluginSummary) -> EndpointHealthRecord {
     if !summary.enabled || summary.status == "disabled" {
         return EndpointHealthRecord {
             state: "unavailable".into(),
@@ -1095,6 +1175,14 @@ fn endpoint_state_from_plugin_status(summary: &PluginSummary) -> EndpointHealthR
             detail: summary.error.clone(),
             models: Vec::new(),
         },
+    }
+}
+
+fn endpoint_state_from_plugin_status(summary: &PluginSummary, now: Instant) -> EndpointHealthState {
+    EndpointHealthState {
+        record: endpoint_record_from_plugin_status(summary),
+        first_checked_at: now,
+        consecutive_failures: 0,
     }
 }
 
@@ -1135,19 +1223,75 @@ fn normalize_test_tool_result_content(result: &rmcp::model::CallToolResult) -> R
 async fn endpoint_health_for_summary(
     summary: &PluginSummary,
     endpoint: &proto::EndpointManifest,
-) -> EndpointHealthRecord {
+    previous: Option<&EndpointHealthState>,
+    now: Instant,
+) -> EndpointHealthState {
     if summary.status != "running" {
-        return endpoint_state_from_plugin_status(summary);
+        return endpoint_state_from_plugin_status(summary, now);
     }
 
-    match probe_endpoint(endpoint).await {
-        Some(health) => health,
-        None => EndpointHealthRecord {
+    let probe = probe_endpoint(endpoint)
+        .await
+        .unwrap_or(EndpointHealthRecord {
             state: "healthy".into(),
             available: true,
             detail: None,
             models: Vec::new(),
-        },
+        });
+    apply_endpoint_probe(previous, probe, now)
+}
+
+fn apply_endpoint_probe(
+    previous: Option<&EndpointHealthState>,
+    probe: EndpointHealthRecord,
+    now: Instant,
+) -> EndpointHealthState {
+    let first_checked_at = previous.map(|state| state.first_checked_at).unwrap_or(now);
+
+    if probe.available {
+        return EndpointHealthState {
+            record: probe,
+            first_checked_at,
+            consecutive_failures: 0,
+        };
+    }
+
+    let failure_streak = previous
+        .map(|state| state.consecutive_failures.saturating_add(1))
+        .unwrap_or(1);
+    let within_startup_grace =
+        now.duration_since(first_checked_at) < Duration::from_secs(ENDPOINT_STARTUP_GRACE_SECS);
+    let was_available = previous
+        .map(|state| state.record.available)
+        .unwrap_or(false);
+
+    let record = if !was_available && within_startup_grace {
+        EndpointHealthRecord {
+            state: "starting".into(),
+            available: false,
+            detail: probe.detail,
+            models: Vec::new(),
+        }
+    } else if was_available && failure_streak < ENDPOINT_FAILURE_THRESHOLD {
+        EndpointHealthRecord {
+            state: "degraded".into(),
+            available: true,
+            detail: probe.detail,
+            models: Vec::new(),
+        }
+    } else {
+        EndpointHealthRecord {
+            state: "unhealthy".into(),
+            available: false,
+            detail: probe.detail,
+            models: Vec::new(),
+        }
+    };
+
+    EndpointHealthState {
+        record,
+        first_checked_at,
+        consecutive_failures: failure_streak,
     }
 }
 
@@ -1426,9 +1570,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn running_plugin_endpoints_are_healthy() {
-        let summary = PluginSummary {
+    fn running_summary() -> PluginSummary {
+        PluginSummary {
             name: "demo".into(),
             kind: "external".into(),
             enabled: true,
@@ -1440,9 +1583,14 @@ mod tests {
             tools: Vec::new(),
             manifest: None,
             error: None,
-        };
+        }
+    }
+
+    #[test]
+    fn running_plugin_endpoints_are_healthy() {
+        let summary = running_summary();
         assert_eq!(
-            endpoint_state_from_plugin_status(&summary),
+            endpoint_record_from_plugin_status(&summary),
             EndpointHealthRecord {
                 state: "healthy".into(),
                 available: true,
@@ -1455,20 +1603,12 @@ mod tests {
     #[test]
     fn restarting_plugin_endpoints_are_not_available() {
         let summary = PluginSummary {
-            name: "demo".into(),
-            kind: "external".into(),
-            enabled: true,
             status: "restarting".into(),
-            version: None,
-            capabilities: Vec::new(),
-            command: None,
-            args: Vec::new(),
-            tools: Vec::new(),
-            manifest: None,
             error: Some("timed out".into()),
+            ..running_summary()
         };
         assert_eq!(
-            endpoint_state_from_plugin_status(&summary),
+            endpoint_record_from_plugin_status(&summary),
             EndpointHealthRecord {
                 state: "starting".into(),
                 available: false,
@@ -1476,6 +1616,97 @@ mod tests {
                 models: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn first_probe_failure_stays_in_startup_grace() {
+        let now = Instant::now();
+        let state = apply_endpoint_probe(
+            None,
+            EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some("GET /models failed".into()),
+                models: Vec::new(),
+            },
+            now,
+        );
+        assert_eq!(state.record.state, "starting");
+        assert!(!state.record.available);
+        assert_eq!(state.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn healthy_endpoint_degrades_before_becoming_unhealthy() {
+        let now = Instant::now();
+        let healthy = EndpointHealthState {
+            record: EndpointHealthRecord {
+                state: "healthy".into(),
+                available: true,
+                detail: None,
+                models: vec!["demo".into()],
+            },
+            first_checked_at: now - Duration::from_secs(ENDPOINT_STARTUP_GRACE_SECS + 1),
+            consecutive_failures: 0,
+        };
+
+        let degraded = apply_endpoint_probe(
+            Some(&healthy),
+            EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some("503".into()),
+                models: Vec::new(),
+            },
+            now,
+        );
+        assert_eq!(degraded.record.state, "degraded");
+        assert!(degraded.record.available);
+        assert_eq!(degraded.consecutive_failures, 1);
+
+        let unhealthy = apply_endpoint_probe(
+            Some(&degraded),
+            EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some("503".into()),
+                models: Vec::new(),
+            },
+            now + Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS),
+        );
+        assert_eq!(unhealthy.record.state, "unhealthy");
+        assert!(!unhealthy.record.available);
+        assert_eq!(unhealthy.consecutive_failures, 2);
+    }
+
+    #[test]
+    fn unhealthy_endpoint_recovers_immediately_on_success() {
+        let now = Instant::now();
+        let unhealthy = EndpointHealthState {
+            record: EndpointHealthRecord {
+                state: "unhealthy".into(),
+                available: false,
+                detail: Some("503".into()),
+                models: Vec::new(),
+            },
+            first_checked_at: now - Duration::from_secs(ENDPOINT_STARTUP_GRACE_SECS + 1),
+            consecutive_failures: ENDPOINT_FAILURE_THRESHOLD,
+        };
+
+        let recovered = apply_endpoint_probe(
+            Some(&unhealthy),
+            EndpointHealthRecord {
+                state: "healthy".into(),
+                available: true,
+                detail: None,
+                models: vec!["demo".into()],
+            },
+            now,
+        );
+        assert_eq!(recovered.record.state, "healthy");
+        assert!(recovered.record.available);
+        assert_eq!(recovered.record.models, vec!["demo".to_string()]);
+        assert_eq!(recovered.consecutive_failures, 0);
     }
 
     #[test]
