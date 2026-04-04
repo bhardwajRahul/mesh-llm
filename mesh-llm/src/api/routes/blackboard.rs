@@ -32,8 +32,8 @@ async fn handle_feed(stream: &mut TcpStream, state: &MeshApi, path: &str) -> any
     let params = query_params(path);
     let args = json!({
         "from": params.iter().find(|(k, _)| *k == "from").map(|(_, v)| v.to_string()),
-        "limit": params.iter().find(|(k, _)| *k == "limit").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(20usize),
-        "since": params.iter().find(|(k, _)| *k == "since").and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0u64),
+        "limit": params.iter().find(|(k, _)| *k == "limit").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(20),
+        "since": params.iter().find(|(k, _)| *k == "since").and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0),
     })
     .to_string();
     match plugin_manager
@@ -72,8 +72,8 @@ async fn handle_search(stream: &mut TcpStream, state: &MeshApi, path: &str) -> a
     let params = query_params(path);
     let args = json!({
         "query": params.iter().find(|(k, _)| *k == "q").map(|(_, v)| v.replace('+', " ").replace("%20", " ")).unwrap_or_default(),
-        "limit": params.iter().find(|(k, _)| *k == "limit").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(20usize),
-        "since": params.iter().find(|(k, _)| *k == "since").and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0u64),
+        "limit": params.iter().find(|(k, _)| *k == "limit").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(20),
+        "since": params.iter().find(|(k, _)| *k == "since").and_then(|(_, v)| v.parse::<u64>().ok()).unwrap_or(0),
     })
     .to_string();
     match plugin_manager

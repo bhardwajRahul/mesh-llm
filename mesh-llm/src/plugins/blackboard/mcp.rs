@@ -136,6 +136,7 @@ impl BlackboardServer {
         {
             Ok(resp) if resp.status().is_success() => {
                 match resp.json::<Vec<super::BlackboardItem>>().await {
+                    Ok(items) if items.is_empty() => "No results.".into(),
                     Ok(items) => format_items(&items),
                     Err(e) => format!("Failed to parse response: {e}"),
                 }
