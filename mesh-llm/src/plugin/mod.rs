@@ -77,6 +77,10 @@ pub struct RpcResult {
 }
 
 pub(crate) type BridgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+#[cfg(test)]
+type TestStreamFuture = Pin<Box<dyn Future<Output = Result<LocalStream>> + Send>>;
+#[cfg(test)]
+type TestStreamHandler = Arc<dyn Fn(proto::OpenStreamRequest) -> TestStreamFuture + Send + Sync>;
 
 pub trait PluginRpcBridge: Send + Sync {
     fn handle_request(
@@ -209,6 +213,8 @@ struct PluginManagerInner {
     test_inference_endpoints: Arc<Mutex<Vec<InferenceEndpointRoute>>>,
     #[cfg(test)]
     test_manifests: Arc<Mutex<BTreeMap<String, proto::PluginManifest>>>,
+    #[cfg(test)]
+    test_stream_handlers: Arc<Mutex<BTreeMap<String, TestStreamHandler>>>,
 }
 
 impl PluginManager {
@@ -291,6 +297,8 @@ impl PluginManager {
                 test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(test)]
                 test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
+                #[cfg(test)]
+                test_stream_handlers: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         };
         manager.start_supervisor();
@@ -312,6 +320,7 @@ impl PluginManager {
                 test_endpoints: Arc::new(Mutex::new(Vec::new())),
                 test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
                 test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
+                test_stream_handlers: Arc::new(Mutex::new(BTreeMap::new())),
             }),
         }
     }
@@ -751,6 +760,18 @@ impl PluginManager {
         *self.inner.rpc_bridge.lock().await = bridge;
     }
 
+    #[cfg(test)]
+    pub async fn set_test_stream_handler<F>(&self, plugin_name: &str, handler: F)
+    where
+        F: Fn(proto::OpenStreamRequest) -> TestStreamFuture + Send + Sync + 'static,
+    {
+        self.inner
+            .test_stream_handlers
+            .lock()
+            .await
+            .insert(plugin_name.to_string(), Arc::new(handler));
+    }
+
     pub async fn dispatch_channel_message(&self, event: PluginMeshEvent) -> Result<()> {
         let PluginMeshEvent::Channel { plugin_id, message } = event else {
             bail!("expected plugin channel event");
@@ -817,6 +838,17 @@ impl PluginManager {
         plugin_name: &str,
         request: proto::OpenStreamRequest,
     ) -> Result<LocalStream> {
+        #[cfg(test)]
+        if let Some(handler) = self
+            .inner
+            .test_stream_handlers
+            .lock()
+            .await
+            .get(plugin_name)
+            .cloned()
+        {
+            return handler(request).await;
+        }
         let response = self.open_stream(plugin_name, request).await?;
         if !response.accepted {
             bail!(
@@ -1040,6 +1072,14 @@ impl PluginManager {
         }
         Ok(endpoints)
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn connect_test_side_stream(
+    endpoint: &str,
+    transport_kind: i32,
+) -> Result<LocalStream> {
+    connect_side_stream(endpoint, transport_kind).await
 }
 
 pub(crate) fn plugin_manifest_overview(manifest: &proto::PluginManifest) -> PluginManifestOverview {

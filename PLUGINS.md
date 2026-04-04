@@ -199,7 +199,41 @@ fn manifest() -> mesh_llm_plugin::proto::PluginManifest {
 }
 ```
 
-This manifest DSL is the stable base layer. A future `plugin! { ... }` wrapper can compile down to the same manifest builders.
+That manifest DSL is the stable base layer.
+
+The current wrapper for simple plugins is `plugin! { ... }`:
+
+```rust
+let plugin = mesh_llm_plugin::plugin! {
+    metadata: PluginMetadata::new(
+        "blackboard",
+        "1.0.0",
+        plugin_server_info(
+            "blackboard",
+            "1.0.0",
+            "Blackboard",
+            "Mesh blackboard services",
+            None::<String>,
+        ),
+    ),
+    capabilities: [capability("blackboard.v1")],
+    mcp: [
+        mcp_tool::<FeedArgs>("feed", "Read recent blackboard messages"),
+        mcp_tool::<PostArgs>("post", "Post a blackboard message"),
+    ],
+    http: [
+        http_get("/feed", "feed").request_schema::<FeedArgs>(),
+        http_post("/post", "post").request_schema::<PostArgs>(),
+    ],
+    tool_router: tool_router(),
+};
+```
+
+`plugin! { ... }` composes:
+
+- plugin metadata
+- manifest sections
+- optional routers for tools, prompts, resources, completions, and tasks
 
 The plugin author declares services and writes normal typed handlers. The runtime and `stapler` handle:
 

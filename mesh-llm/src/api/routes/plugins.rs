@@ -294,6 +294,7 @@ async fn handle_streamed_http_binding(
     binding: &crate::plugin::proto::HttpBindingManifest,
     raw_request: &[u8],
 ) -> anyhow::Result<()> {
+    let forwarded_request = rewrite_http_request_path(raw_request, &binding.path)?;
     let stream_id = format!("http-{}-{}", std::process::id(), rand::random::<u64>());
     let request = crate::plugin::proto::OpenStreamRequest {
         stream_id,
@@ -310,11 +311,10 @@ async fn handle_streamed_http_binding(
             })
             .to_string(),
         ),
-        expected_bytes: Some(raw_request.len() as u64),
+        expected_bytes: Some(forwarded_request.len() as u64),
         idle_timeout_ms: Some(30_000),
     };
     let mut plugin_stream = plugin_manager.connect_stream(plugin_name, request).await?;
-    let forwarded_request = rewrite_http_request_path(raw_request, &binding.path)?;
     plugin_stream.write_all(&forwarded_request).await?;
     plugin_stream.shutdown().await?;
 
@@ -445,6 +445,12 @@ fn query_arguments(path: &str) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::MeshApi;
+    use crate::mesh::{Node, NodeRole};
+    use crate::network::affinity;
+    use crate::plugin::{self};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
 
     #[test]
     fn parses_stapled_http_path() {
@@ -517,5 +523,149 @@ mod tests {
             binding_transfer_mode(&binding),
             HttpBindingTransferMode::StreamedBidirectional
         );
+    }
+
+    async fn connected_tcp_streams() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    async fn build_test_api_with_plugin_manager(plugin_manager: plugin::PluginManager) -> MeshApi {
+        let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+        MeshApi::new(
+            node,
+            "test-model".into(),
+            3131,
+            0,
+            plugin_manager,
+            affinity::AffinityRouter::default(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streamed_http_bindings_proxy_all_transfer_modes_over_side_streams() {
+        struct NoopBridge;
+        impl plugin::PluginRpcBridge for NoopBridge {
+            fn handle_request(
+                &self,
+                _plugin_name: String,
+                _method: String,
+                _params_json: String,
+            ) -> plugin::BridgeFuture<Result<plugin::RpcResult, crate::plugin::proto::ErrorResponse>>
+            {
+                Box::pin(async {
+                    Err(crate::plugin::proto::ErrorResponse {
+                        code: rmcp::model::ErrorCode::INTERNAL_ERROR.0,
+                        message: "unexpected request".into(),
+                        data_json: String::new(),
+                    })
+                })
+            }
+
+            fn handle_notification(
+                &self,
+                _plugin_name: String,
+                _method: String,
+                _params_json: String,
+            ) -> plugin::BridgeFuture<()> {
+                Box::pin(async {})
+            }
+        }
+
+        let plugin_manager =
+            plugin::PluginManager::for_test_bridge(&["demo"], std::sync::Arc::new(NoopBridge));
+        let transfer_modes = [
+            (
+                crate::plugin::proto::HttpBodyMode::Buffered,
+                crate::plugin::proto::HttpBodyMode::Streamed,
+            ),
+            (
+                crate::plugin::proto::HttpBodyMode::Streamed,
+                crate::plugin::proto::HttpBodyMode::Buffered,
+            ),
+            (
+                crate::plugin::proto::HttpBodyMode::Streamed,
+                crate::plugin::proto::HttpBodyMode::Streamed,
+            ),
+        ];
+        for (request_mode, response_mode) in transfer_modes {
+            plugin_manager
+                .set_test_manifests(std::collections::BTreeMap::from([(
+                    "demo".into(),
+                    crate::plugin::proto::PluginManifest {
+                        http_bindings: vec![crate::plugin::proto::HttpBindingManifest {
+                            binding_id: "stream".into(),
+                            method: crate::plugin::proto::HttpMethod::Post as i32,
+                            path: "/stream".into(),
+                            operation_name: Some("stream".into()),
+                            request_body_mode: request_mode as i32,
+                            response_body_mode: response_mode as i32,
+                            request_schema_json: None,
+                            response_schema_json: None,
+                        }],
+                        ..Default::default()
+                    },
+                )]))
+                .await;
+            plugin_manager
+                .set_test_stream_handler("demo", move |request| {
+                    Box::pin(async move {
+                        let mut request = request;
+                        request.stream_id = "s".into();
+                        let listener =
+                            mesh_llm_plugin::bind_side_stream("demo", &request.stream_id).await?;
+                        let response = listener.open_stream_response(&request);
+                        let endpoint = response.endpoint.clone().unwrap();
+                        let transport_kind = response.transport_kind;
+                        tokio::spawn(async move {
+                            let mut plugin_stream = listener.accept().await.unwrap();
+                            let mut request_bytes =
+                                vec![0u8; request.expected_bytes.unwrap_or_default() as usize];
+                            plugin_stream
+                                .read_exact_bytes(&mut request_bytes)
+                                .await
+                                .unwrap();
+                            let request_text = String::from_utf8_lossy(&request_bytes);
+                            assert!(request_text.starts_with("POST /stream HTTP/1.1\r\n"));
+                            assert!(request_text.contains("Connection: close\r\n"));
+                            plugin_stream
+                                .write_all_bytes(
+                                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"ok\":true}\n",
+                                )
+                                .await
+                                .unwrap();
+                        });
+                        crate::plugin::connect_test_side_stream(&endpoint, transport_kind).await
+                    })
+                })
+                .await;
+            let state = build_test_api_with_plugin_manager(plugin_manager.clone()).await;
+            let (mut observed_client, mut response_stream) = connected_tcp_streams().await;
+            let raw_request = b"POST /api/plugins/demo/http/stream HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n{\"a\":1}";
+            handle_stapled_http(
+                &mut response_stream,
+                &state,
+                "POST",
+                "/api/plugins/demo/http/stream",
+                "/api/plugins/demo/http/stream",
+                "{\"a\":1}",
+                raw_request,
+            )
+            .await
+            .unwrap();
+            response_stream.shutdown().await.unwrap();
+            let mut response_bytes = Vec::new();
+            observed_client
+                .read_to_end(&mut response_bytes)
+                .await
+                .unwrap();
+            let response_text = String::from_utf8_lossy(&response_bytes);
+            assert!(response_text.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response_text.contains("{\"ok\":true}"));
+        }
     }
 }

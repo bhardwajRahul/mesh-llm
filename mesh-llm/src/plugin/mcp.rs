@@ -1522,6 +1522,7 @@ mod proto_error {
 mod tests {
     use super::*;
     use crate::plugin::PluginEndpointSummary;
+    use axum::Router;
     use rmcp::model::{
         AnnotateAble, CallToolResult, GetPromptResult, Implementation, ListPromptsResult,
         ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, Prompt, PromptMessage,
@@ -1530,6 +1531,9 @@ mod tests {
         ServerInfo, Tool,
     };
     use rmcp::service::RequestContext;
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpService,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1699,6 +1703,22 @@ mod tests {
                 .await;
         });
         address
+    }
+
+    async fn spawn_fake_external_http_endpoint() -> String {
+        let service: StreamableHttpService<FakeExternalMcpServer, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(FakeExternalMcpServer),
+                Default::default(),
+                Default::default(),
+            );
+        let router = Router::new().nest_service("/mcp", service);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{address}/mcp")
     }
 
     #[cfg(unix)]
@@ -1919,5 +1939,35 @@ mod tests {
                 uri: "http://127.0.0.1:9000/mcp".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn http_external_mcp_endpoint_is_aggregated() {
+        let uri = spawn_fake_external_http_endpoint().await;
+        let plugin_manager = PluginManager::for_test_bridge(&[], Arc::new(NoopBridge));
+        plugin_manager
+            .set_test_endpoints(vec![PluginEndpointSummary {
+                plugin_name: "adapter".into(),
+                plugin_status: "running".into(),
+                endpoint_id: "remote".into(),
+                state: "healthy".into(),
+                available: true,
+                kind: "mcp".into(),
+                transport_kind: "http".into(),
+                protocol: Some("streamable_http".into()),
+                address: Some(uri),
+                args: Vec::new(),
+                namespace: Some("remote".into()),
+                supports_streaming: true,
+                managed_by_plugin: false,
+                detail: None,
+                models: Vec::new(),
+            }])
+            .await;
+        let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
+        let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("adapter.remote.echo"));
+        let prompts = server.discover_prompts().await.unwrap();
+        assert!(prompts.contains_key("adapter.remote.brief"));
     }
 }

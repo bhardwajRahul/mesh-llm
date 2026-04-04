@@ -63,3 +63,36 @@ macro_rules! plugin_manifest {
         builder.build()
     }};
 }
+
+#[macro_export]
+macro_rules! plugin {
+    (
+        metadata: $metadata:expr,
+        $(capabilities: [$($capability:expr),* $(,)?],)?
+        $(mcp: [$($mcp:expr),* $(,)?],)?
+        $(http: [$($http:expr),* $(,)?],)?
+        $(endpoints: [$($endpoint:expr),* $(,)?],)?
+        $(tool_router: $tool_router:expr,)?
+        $(prompt_router: $prompt_router:expr,)?
+        $(resource_router: $resource_router:expr,)?
+        $(completion_router: $completion_router:expr,)?
+        $(task_router: $task_router:expr,)?
+    ) => {{
+        let manifest = $crate::plugin_manifest![
+            $($($capability),*,)?
+            $($($mcp),*,)?
+            $($($http),*,)?
+            $($($endpoint),*,)?
+        ];
+        let metadata = $metadata
+            .with_capabilities(manifest.capabilities.clone())
+            .with_manifest(manifest);
+        let plugin = $crate::SimplePlugin::new(metadata)
+            $(.with_tool_router($tool_router))?
+            $(.with_prompt_router($prompt_router))?
+            $(.with_resource_router($resource_router))?
+            $(.with_completion_router($completion_router))?
+            $(.with_task_router($task_router))?;
+        plugin
+    }};
+}

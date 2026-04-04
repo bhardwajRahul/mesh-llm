@@ -499,6 +499,7 @@ fn default_binding_id(path: &str, operation_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{plugin_server_info, Plugin, PluginMetadata, ToolRouter};
 
     #[allow(dead_code)]
     #[derive(schemars::JsonSchema)]
@@ -548,5 +549,28 @@ mod tests {
             binding.response_body_mode,
             proto::HttpBodyMode::Streamed as i32
         );
+    }
+
+    #[test]
+    fn plugin_macro_builds_simple_plugin_with_manifest() {
+        let plugin = crate::plugin! {
+            metadata: PluginMetadata::new(
+                "demo",
+                "1.0.0",
+                plugin_server_info("demo", "1.0.0", "Demo", "Demo plugin", None::<String>),
+            ),
+            capabilities: [capability("demo.v1")],
+            mcp: [mcp_tool::<DemoInput>("echo", "Echo input")],
+            http: [http_post("/echo", "echo").request_schema::<DemoInput>()],
+            endpoints: [mcp_stdio_endpoint("stdio", "demo-mcp")],
+            tool_router: ToolRouter::new(),
+        };
+
+        let manifest = plugin.manifest().expect("manifest");
+        assert_eq!(plugin.capabilities(), vec!["demo.v1"]);
+        assert_eq!(manifest.capabilities, vec!["demo.v1"]);
+        assert_eq!(manifest.mcp_tools.len(), 1);
+        assert_eq!(manifest.http_bindings.len(), 1);
+        assert_eq!(manifest.endpoints.len(), 1);
     }
 }
