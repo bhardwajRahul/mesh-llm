@@ -1736,7 +1736,7 @@ impl Node {
             current_time_unix_ms(),
         );
         let config_state_init = {
-            let path = crate::plugin::config_path(None)
+            let path = crate::plugin::config_path(config_path.as_deref())
                 .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
             crate::runtime::config_state::ConfigState::load(&path)?
         };
