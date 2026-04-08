@@ -1548,12 +1548,18 @@ async fn probe_http_response_local<R: AsyncRead + Unpin>(reader: &mut R) -> Resu
 /// hardware with large prompts and concurrent slots completes well
 /// within this window.
 fn local_response_first_byte_timeout() -> Duration {
-    std::env::var("MESH_LLM_LOCAL_FIRST_BYTE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(10 * 60))
+    match std::env::var("MESH_LLM_LOCAL_FIRST_BYTE_TIMEOUT_SECS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                tracing::warn!(
+                    "Invalid MESH_LLM_LOCAL_FIRST_BYTE_TIMEOUT_SECS={raw:?}, using default 600s"
+                );
+                Duration::from_secs(10 * 60)
+            }
+        },
+        Err(_) => Duration::from_secs(10 * 60),
+    }
 }
 
 async fn probe_http_response_with_timeout<R: AsyncRead + Unpin>(
@@ -3126,14 +3132,15 @@ mod tests {
         assert!(raw.contains("Connection: close\r\n\r\n"));
     }
 
-    /// `probe_http_response_local` (used for local llama-server) must NOT
-    /// apply a first-byte timeout, because prefill on a busy or slow
-    /// machine can legitimately exceed 60s.
+    /// `probe_http_response_local` uses a much longer timeout (10 min)
+    /// than `probe_http_response` (60s), because local llama-server
+    /// prefill can legitimately take minutes under load.
     ///
     /// This test sends a response after a 2s delay and verifies that
-    /// `probe_http_response_local` waits for it without timing out.
+    /// `probe_http_response_local` waits for it (well within its 10-min
+    /// window) rather than failing at the 60s remote timeout.
     #[tokio::test]
-    async fn test_probe_http_response_local_has_no_first_byte_timeout() {
+    async fn test_probe_http_response_local_tolerates_slow_first_byte() {
         use tokio::io::AsyncWriteExt;
 
         let (client, mut server) = tokio::io::duplex(4096);

@@ -1492,7 +1492,10 @@ pub async fn election_loop(
                 http_port: ingress_http_port,
             })
             .await;
-            tunnel_mgr.set_http_port(ingress_http_port);
+            // Point tunnel directly at llama-server, bypassing the API proxy.
+            // The client proxy has already normalized the request; the host
+            // doesn't need to re-parse or re-route it.
+            tunnel_mgr.set_http_port(llama_port);
             currently_host = true;
             current_local_port = Some(llama_port);
             last_worker_set = new_worker_set;
@@ -1876,7 +1879,7 @@ async fn moe_election_loop(
                         http_port: ingress_http_port,
                     })
                     .await;
-                    tunnel_mgr.set_http_port(ingress_http_port);
+                    tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
                     current_local_port = Some(llama_port);
                     llama_process = Some(process);
@@ -1959,7 +1962,7 @@ async fn moe_election_loop(
                             http_port: ingress_http_port,
                         })
                         .await;
-                        tunnel_mgr.set_http_port(ingress_http_port);
+                        tunnel_mgr.set_http_port(llama_port);
                         currently_running = true;
                         current_local_port = Some(llama_port);
                         llama_process = Some(process);
@@ -2100,7 +2103,7 @@ async fn moe_election_loop(
                         http_port: ingress_http_port,
                     })
                     .await;
-                    tunnel_mgr.set_http_port(ingress_http_port);
+                    tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
                     current_local_port = Some(llama_port);
                     llama_process = Some(process);
