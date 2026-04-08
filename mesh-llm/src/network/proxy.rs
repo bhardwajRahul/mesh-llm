@@ -1986,7 +1986,11 @@ pub async fn handle_mesh_request(
         match node.any_host().await {
             Some(p) => vec![p.id],
             None => {
-                let _ = send_503(tcp_stream).await;
+                let _ = send_503(
+                    tcp_stream,
+                    "no peers serving any model (mesh empty or gossip stale)",
+                )
+                .await;
                 release_request_objects(&node, &request.request_object_request_ids).await;
                 return;
             }
@@ -2113,7 +2117,11 @@ pub async fn handle_mesh_request(
     if last_retryable {
         tracing::warn!("All hosts failed for model {:?}", effective_model);
     }
-    let _ = send_503(tcp_stream).await;
+    let reason = format!(
+        "all {} tunnel(s) to hosts for {:?} failed (mesh request)",
+        total_targets, effective_model,
+    );
+    let _ = send_503(tcp_stream, &reason).await;
     release_request_objects(&node, &request.request_object_request_ids).await;
 }
 
@@ -2178,7 +2186,13 @@ pub async fn route_model_request(
         affinity,
     );
     if matches!(selection.target, election::InferenceTarget::None) {
-        let _ = send_503(tcp_stream).await;
+        let _ = send_503(
+            tcp_stream,
+            &format!(
+                "target for model '{model}' resolved to None (election in progress or host down)"
+            ),
+        )
+        .await;
         return true;
     }
 
@@ -2261,7 +2275,11 @@ pub async fn route_model_request(
         }
     }
 
-    let _ = send_503(tcp_stream).await;
+    let _ = send_503(
+        tcp_stream,
+        &format!("all {} target(s) for model '{model}' failed", total_targets),
+    )
+    .await;
     true
 }
 
@@ -2276,7 +2294,11 @@ pub async fn route_moe_request(
 ) -> bool {
     let mut tcp_stream = tcp_stream;
     let Some(primary_target) = targets.get_moe_target(session_hint) else {
-        let _ = send_503(tcp_stream).await;
+        let _ = send_503(
+            tcp_stream,
+            &format!("no MoE target for model '{model}' session '{session_hint}'"),
+        )
+        .await;
         return false;
     };
     let mut ordered = order_targets_by_context(
@@ -2287,7 +2309,11 @@ pub async fn route_moe_request(
     )
     .await;
     if ordered.is_empty() {
-        let _ = send_503(tcp_stream).await;
+        let _ = send_503(
+            tcp_stream,
+            &format!("no MoE failover targets for model '{model}'"),
+        )
+        .await;
         return false;
     }
     move_target_first(&mut ordered, &primary_target);
@@ -2326,7 +2352,11 @@ pub async fn route_moe_request(
         }
     }
 
-    let _ = send_503(tcp_stream).await;
+    let _ = send_503(
+        tcp_stream,
+        &format!("all MoE targets for model '{model}' failed"),
+    )
+    .await;
     true
 }
 
@@ -2361,7 +2391,11 @@ pub async fn route_to_target(
             if let Some(moe_host_id) = moe_remote_id {
                 node.handle_peer_death(moe_host_id).await;
             }
-            let _ = send_503(tcp_stream).await;
+            let _ = send_503(
+                tcp_stream,
+                &format!("single target {target:?} unavailable (route_to_target)"),
+            )
+            .await;
             false
         }
     }
@@ -2478,8 +2512,13 @@ pub async fn send_error(mut stream: TcpStream, code: u16, msg: &str) -> std::io:
     Ok(())
 }
 
-pub async fn send_503(mut stream: TcpStream) -> std::io::Result<()> {
-    let body = r#"{"error":"No inference server available — election in progress"}"#;
+pub async fn send_503(stream: TcpStream, reason: &str) -> std::io::Result<()> {
+    tracing::warn!("503 → client: {reason}");
+    send_503_inner(stream, reason).await
+}
+
+async fn send_503_inner(mut stream: TcpStream, reason: &str) -> std::io::Result<()> {
+    let body = serde_json::json!({"error": reason}).to_string();
     let resp = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         body.len(), body
