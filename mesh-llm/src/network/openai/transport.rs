@@ -16,7 +16,7 @@ use crate::network::router;
 use crate::plugin;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use url::Url;
@@ -83,6 +83,14 @@ enum RouteAttemptResult {
     Delivered { status_code: u16 },
     RetryableUnavailable,
     RetryableContextOverflow,
+}
+
+fn route_attempt_result_label(result: &RouteAttemptResult) -> &'static str {
+    match result {
+        RouteAttemptResult::Delivered { .. } => "delivered",
+        RouteAttemptResult::RetryableUnavailable => "retryable_unavailable",
+        RouteAttemptResult::RetryableContextOverflow => "retryable_context_overflow",
+    }
 }
 
 struct ParsedResponseHeaders {
@@ -1092,6 +1100,7 @@ async fn probe_http_response_with_timeout<R: AsyncRead + Unpin>(
     reader: &mut R,
     timeout: Duration,
 ) -> Result<ResponseProbe> {
+    let started = Instant::now();
     let mut buffered = Vec::with_capacity(8192);
     let parsed = loop {
         if let Some(parsed) = try_parse_response_headers(&buffered)? {
@@ -1137,6 +1146,12 @@ async fn probe_http_response_with_timeout<R: AsyncRead + Unpin>(
         && is_retryable_context_overflow_response(
             &buffered[parsed.header_end..parsed.header_end + preview_len],
         );
+    tracing::debug!(
+        status_code = parsed.status_code,
+        header_bytes = parsed.header_end,
+        probe_ms = started.elapsed().as_millis(),
+        "openai transport: upstream response probe complete"
+    );
 
     Ok(ResponseProbe {
         buffered,
@@ -1808,6 +1823,7 @@ pub async fn route_model_request(
     response_adapter: ResponseAdapter,
     affinity: &AffinityRouter,
 ) -> bool {
+    let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
     let ordered_candidates =
         order_targets_by_context(&node, model, parsed_body, &targets.candidates(model)).await;
@@ -1859,10 +1875,13 @@ pub async fn route_model_request(
     let mut ordered = ordered_candidates;
     move_target_first(&mut ordered, &selection.target);
     let total_targets = ordered.len();
+    let mut attempts = 0usize;
     let mut refreshed = false;
     for (idx, target) in ordered.into_iter().enumerate() {
+        attempts += 1;
+        let attempt_started = Instant::now();
         let retry_context_overflow = idx + 1 < total_targets;
-        match route_attempt_for_target(
+        let attempt_result = route_attempt_for_target(
             &node,
             &mut tcp_stream,
             &target,
@@ -1870,14 +1889,31 @@ pub async fn route_model_request(
             retry_context_overflow,
             response_adapter,
         )
-        .await
-        {
+        .await;
+        tracing::info!(
+            model = model,
+            target = ?target,
+            attempt = attempts,
+            total_targets = total_targets,
+            outcome = route_attempt_result_label(&attempt_result),
+            attempt_ms = attempt_started.elapsed().as_millis(),
+            total_route_ms = route_started.elapsed().as_millis(),
+            "openai route_model_request attempt"
+        );
+        match attempt_result {
             RouteAttemptResult::Delivered { status_code } => {
                 if should_learn_affinity(status_code) {
                     if let Some(prefix_hash) = selection.learn_prefix_hash {
                         affinity.learn_target(model, prefix_hash, &target);
                     }
                 }
+                tracing::info!(
+                    model = model,
+                    attempts = attempts,
+                    status_code = status_code,
+                    route_ms = route_started.elapsed().as_millis(),
+                    "openai route_model_request delivered"
+                );
                 return true;
             }
             RouteAttemptResult::RetryableContextOverflow => {
@@ -1917,6 +1953,12 @@ pub async fn route_model_request(
         &format!("all {} target(s) for model '{model}' failed", total_targets),
     )
     .await;
+    tracing::warn!(
+        model = model,
+        attempts = attempts,
+        route_ms = route_started.elapsed().as_millis(),
+        "openai route_model_request exhausted targets"
+    );
     true
 }
 
@@ -1929,6 +1971,7 @@ pub async fn route_moe_request(
     parsed_body: Option<&serde_json::Value>,
     prefetched: &[u8],
 ) -> bool {
+    let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
     let Some(primary_target) = targets.get_moe_target(session_hint) else {
         let _ = send_503(
@@ -1956,10 +1999,13 @@ pub async fn route_moe_request(
     move_target_first(&mut ordered, &primary_target);
 
     let total_targets = ordered.len();
+    let mut attempts = 0usize;
     let mut refreshed = false;
     for (idx, target) in ordered.into_iter().enumerate() {
+        attempts += 1;
+        let attempt_started = Instant::now();
         let retry_context_overflow = idx + 1 < total_targets;
-        match route_attempt_for_target(
+        let attempt_result = route_attempt_for_target(
             &node,
             &mut tcp_stream,
             &target,
@@ -1967,9 +2013,30 @@ pub async fn route_moe_request(
             retry_context_overflow,
             ResponseAdapter::None,
         )
-        .await
-        {
-            RouteAttemptResult::Delivered { .. } => return true,
+        .await;
+        tracing::info!(
+            model = model,
+            session_hint = session_hint,
+            target = ?target,
+            attempt = attempts,
+            total_targets = total_targets,
+            outcome = route_attempt_result_label(&attempt_result),
+            attempt_ms = attempt_started.elapsed().as_millis(),
+            total_route_ms = route_started.elapsed().as_millis(),
+            "openai route_moe_request attempt"
+        );
+        match attempt_result {
+            RouteAttemptResult::Delivered { status_code } => {
+                tracing::info!(
+                    model = model,
+                    session_hint = session_hint,
+                    attempts = attempts,
+                    status_code = status_code,
+                    route_ms = route_started.elapsed().as_millis(),
+                    "openai route_moe_request delivered"
+                );
+                return true;
+            }
             RouteAttemptResult::RetryableContextOverflow => {
                 tracing::warn!("MoE target {target:?} rejected request with context overflow-style 400, trying next");
             }
@@ -1994,6 +2061,13 @@ pub async fn route_moe_request(
         &format!("all MoE targets for model '{model}' failed"),
     )
     .await;
+    tracing::warn!(
+        model = model,
+        session_hint = session_hint,
+        attempts = attempts,
+        route_ms = route_started.elapsed().as_millis(),
+        "openai route_moe_request exhausted targets"
+    );
     true
 }
 
@@ -2007,13 +2081,14 @@ pub async fn route_to_target(
     prefetched: &[u8],
     response_adapter: ResponseAdapter,
 ) -> bool {
+    let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
     tracing::info!("API proxy: routing to target {target:?}");
     let moe_remote_id = match &target {
         election::InferenceTarget::MoeRemote(host_id) => Some(*host_id),
         _ => None,
     };
-    match route_attempt_for_target(
+    let result = route_attempt_for_target(
         &node,
         &mut tcp_stream,
         &target,
@@ -2021,8 +2096,14 @@ pub async fn route_to_target(
         false,
         response_adapter,
     )
-    .await
-    {
+    .await;
+    tracing::info!(
+        target = ?target,
+        outcome = route_attempt_result_label(&result),
+        route_ms = route_started.elapsed().as_millis(),
+        "openai route_to_target result"
+    );
+    match result {
         RouteAttemptResult::Delivered { .. } => true,
         RouteAttemptResult::RetryableContextOverflow | RouteAttemptResult::RetryableUnavailable => {
             if let Some(moe_host_id) = moe_remote_id {
@@ -2045,7 +2126,8 @@ pub async fn route_http_endpoint_request(
     request_path: &str,
     response_adapter: ResponseAdapter,
 ) -> bool {
-    match route_http_endpoint_attempt(
+    let started = Instant::now();
+    let result = route_http_endpoint_attempt(
         tcp_stream,
         base_url,
         prefetched,
@@ -2053,8 +2135,15 @@ pub async fn route_http_endpoint_request(
         false,
         response_adapter,
     )
-    .await
-    {
+    .await;
+    tracing::info!(
+        endpoint = base_url,
+        path = request_path,
+        outcome = route_attempt_result_label(&result),
+        route_ms = started.elapsed().as_millis(),
+        "openai route_http_endpoint_request result"
+    );
+    match result {
         RouteAttemptResult::Delivered { .. } => true,
         RouteAttemptResult::RetryableContextOverflow | RouteAttemptResult::RetryableUnavailable => {
             false
@@ -2403,6 +2492,22 @@ mod tests {
     fn test_pipeline_request_supported_rejects_other_endpoint() {
         let body = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
         assert!(!pipeline_request_supported("/v1/responses", &body));
+    }
+
+    #[test]
+    fn test_route_attempt_result_label_values() {
+        assert_eq!(
+            route_attempt_result_label(&RouteAttemptResult::Delivered { status_code: 200 }),
+            "delivered"
+        );
+        assert_eq!(
+            route_attempt_result_label(&RouteAttemptResult::RetryableUnavailable),
+            "retryable_unavailable"
+        );
+        assert_eq!(
+            route_attempt_result_label(&RouteAttemptResult::RetryableContextOverflow),
+            "retryable_context_overflow"
+        );
     }
 
     #[test]
