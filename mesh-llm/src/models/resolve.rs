@@ -561,11 +561,131 @@ mod tests {
     }
 
     #[test]
+    fn gemma_repo_default_prefers_q4_over_bf16_at_local_fit_budget() {
+        // Mirrors gemma-4-31B-it-GGUF default-pick behavior:
+        // at ~19.3GB available, prefer Q4_0 over BF16.
+        let available = 19_300_000_000u64;
+        let ordering = compare_gguf_candidates_by_fit(
+            "unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-Q4_0.gguf",
+            Some(17_300_000_000),
+            "unsloth/gemma-4-31B-it-GGUF/BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf",
+            Some(50_000_000_000),
+            available,
+        );
+        assert_eq!(ordering, Ordering::Less);
+    }
+
+    #[test]
     fn repo_name_can_signal_gguf_intent() {
         assert!(repo_prefers_gguf_only("unsloth/gemma-4-31B-it-GGUF"));
         assert!(!repo_prefers_gguf_only(
             "mlx-community/Llama-3.2-3B-Instruct-4bit"
         ));
+    }
+
+    #[test]
+    fn parse_exact_model_ref_accepts_unsloth_gemma_repo_ref() {
+        let parsed = parse_exact_model_ref("unsloth/gemma-4-31B-it-GGUF").unwrap();
+        match parsed {
+            ExactModelRef::HuggingFace {
+                repo,
+                revision,
+                file,
+            } => {
+                assert_eq!(repo, "unsloth/gemma-4-31B-it-GGUF");
+                assert_eq!(revision, None);
+                assert_eq!(file, "");
+            }
+            other => panic!("expected HuggingFace repo ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_exact_model_ref_accepts_unsloth_gemma_repo_url() {
+        let parsed =
+            parse_exact_model_ref("https://huggingface.co/unsloth/gemma-4-31B-it-GGUF").unwrap();
+        match parsed {
+            ExactModelRef::HuggingFace {
+                repo,
+                revision,
+                file,
+            } => {
+                assert_eq!(repo, "unsloth/gemma-4-31B-it-GGUF");
+                assert_eq!(revision, None);
+                assert_eq!(file, "");
+            }
+            other => panic!("expected HuggingFace repo ref from URL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_exact_model_ref_accepts_unsloth_gemma_quant_selector() {
+        let parsed = parse_exact_model_ref("unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL").unwrap();
+        match parsed {
+            ExactModelRef::HuggingFace {
+                repo,
+                revision,
+                file,
+            } => {
+                assert_eq!(repo, "unsloth/gemma-4-31B-it-GGUF");
+                assert_eq!(revision, None);
+                assert_eq!(file, "UD-Q4_K_XL");
+            }
+            other => panic!("expected HuggingFace quant selector ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simulated_name_and_repo_quant_inputs_converge_to_same_ref() {
+        // Simulate the two user inputs:
+        // 1) gemma-4-31B-it-GGUF:UD-Q4_K_XL  (requires repo discovery)
+        // 2) unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL (repo explicit)
+        //
+        // After discovery chooses the same repo, both should resolve via the
+        // same quant selector to the same final artifact ref.
+        let discovered_repo = "unsloth/gemma-4-31B-it-GGUF";
+        let selector = "UD-Q4_K_XL";
+        let siblings = vec![
+            "gemma-4-31B-it-Q4_0.gguf".to_string(),
+            "gemma-4-31B-it-UD-Q4_K_XL.gguf".to_string(),
+            "BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf".to_string(),
+        ];
+
+        let from_name = format!(
+            "{}/{}",
+            discovered_repo,
+            resolve_hf_file_from_siblings(selector, &siblings).unwrap()
+        );
+        let from_repo = format!(
+            "{}/{}",
+            discovered_repo,
+            resolve_hf_file_from_siblings(selector, &siblings).unwrap()
+        );
+
+        assert_eq!(
+            from_name,
+            "unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-UD-Q4_K_XL.gguf"
+        );
+        assert_eq!(from_name, from_repo);
+    }
+
+    #[test]
+    fn parse_exact_model_ref_accepts_unsloth_gemma_repo_url_with_quant_selector() {
+        let parsed =
+            parse_exact_model_ref("https://huggingface.co/unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL")
+                .unwrap();
+        match parsed {
+            ExactModelRef::HuggingFace {
+                repo,
+                revision,
+                file,
+            } => {
+                assert_eq!(repo, "unsloth/gemma-4-31B-it-GGUF");
+                assert_eq!(revision, None);
+                assert_eq!(file, "UD-Q4_K_XL");
+            }
+            other => panic!("expected HuggingFace repo URL quant selector ref, got {other:?}"),
+        }
     }
 }
 
