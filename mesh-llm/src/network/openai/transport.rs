@@ -2211,12 +2211,14 @@ pub async fn send_json_ok(mut stream: TcpStream, data: &serde_json::Value) -> st
 }
 
 pub async fn send_400(mut stream: TcpStream, msg: &str) -> std::io::Result<()> {
-    let body = format!("{{\"error\":\"{msg}\"}}");
-    let resp = format!(
-        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
+    let body = serde_json::to_vec(&serde_json::json!({ "error": msg }))
+        .expect("serializing JSON error response should not fail");
+    let headers = format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
     );
-    stream.write_all(resp.as_bytes()).await?;
+    stream.write_all(headers.as_bytes()).await?;
+    stream.write_all(&body).await?;
     stream.shutdown().await?;
     Ok(())
 }
