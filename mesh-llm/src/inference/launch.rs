@@ -215,6 +215,8 @@ fn resolve_binary_path(
 pub struct InferenceServerHandle {
     pid: u32,
     expected_exit: Arc<AtomicBool>,
+    expected_comm: String,
+    expected_start_time: Option<i64>,
     pub(crate) _pidfile_guard: Option<crate::runtime::instance::PidfileGuard>,
 }
 
@@ -225,7 +227,14 @@ impl InferenceServerHandle {
 
     pub async fn shutdown(&self) {
         self.expected_exit.store(true, Ordering::Relaxed);
-        _terminate_process_internal(self.pid).await;
+        terminate_process_with_wait(
+            self.pid,
+            &self.expected_comm,
+            self.expected_start_time,
+            20,
+            std::time::Duration::from_millis(250),
+        )
+        .await;
     }
 }
 
@@ -240,13 +249,12 @@ impl Drop for InferenceServerHandle {
         if self.expected_exit.swap(true, Ordering::Relaxed) {
             return;
         }
-        if !is_safe_kill_target(self.pid) {
-            return;
-        }
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(self.pid as libc::pid_t, libc::SIGTERM);
-        }
+        let _ = send_signal_if_matches(
+            self.pid,
+            &self.expected_comm,
+            self.expected_start_time,
+            ProcessSignal::Terminate,
+        );
     }
 }
 
@@ -259,6 +267,8 @@ pub struct RpcServerHandle {
     pub pid: u32,
     pub port: u16,
     pub expected_exit: Arc<AtomicBool>,
+    pub expected_comm: String,
+    pub expected_start_time: Option<i64>,
     pub(crate) _pidfile_guard: Option<crate::runtime::instance::PidfileGuard>,
 }
 
@@ -271,40 +281,26 @@ impl Drop for RpcServerHandle {
         if self.expected_exit.swap(true, Ordering::Relaxed) {
             return;
         }
-        if !is_safe_kill_target(self.pid) {
-            return;
-        }
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(self.pid as libc::pid_t, libc::SIGTERM);
-        }
+        let _ = send_signal_if_matches(
+            self.pid,
+            &self.expected_comm,
+            self.expected_start_time,
+            ProcessSignal::Terminate,
+        );
     }
 }
 
 impl RpcServerHandle {
     pub async fn shutdown(&self) {
-        if !is_safe_kill_target(self.pid) {
-            tracing::error!(
-                "BUG: RpcServerHandle has invalid pid={} — refusing to signal",
-                self.pid
-            );
-            self.expected_exit.store(true, Ordering::Relaxed);
-            return;
-        }
         self.expected_exit.store(true, Ordering::Relaxed);
-        #[cfg(unix)]
-        {
-            unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
-            for _ in 0..50 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if crate::runtime::instance::validate::process_liveness(self.pid)
-                    == crate::runtime::instance::validate::Liveness::Dead
-                {
-                    return;
-                }
-            }
-            unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
-        }
+        terminate_process_with_wait(
+            self.pid,
+            &self.expected_comm,
+            self.expected_start_time,
+            50,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
     }
 }
 
@@ -766,15 +762,14 @@ pub async fn start_rpc_server(
     if pid == 0 {
         anyhow::bail!("rpc-server returned PID 0 — refusing to proceed");
     }
-    let child_started_at: i64 = crate::runtime::instance::validate::process_started_at_unix(pid)
-        .unwrap_or(None)
-        .unwrap_or(0);
+    let child_started_at = crate::runtime::instance::validate::process_started_at_unix(pid)
+        .unwrap_or(None);
     let owner_started_at: i64 =
         crate::runtime::instance::validate::current_process_start_time_unix().unwrap_or(0);
     let metadata = crate::runtime::instance::PidfileMetadata {
         cmd_name: "rpc-server".to_string(),
         child_pid: pid,
-        child_started_at_unix: child_started_at,
+        child_started_at_unix: child_started_at.unwrap_or(0),
         owner_pid: std::process::id(),
         owner_started_at_unix: owner_started_at,
         argv_snippet: crate::runtime::instance::PidfileMetadata::cap_argv(
@@ -802,6 +797,8 @@ pub async fn start_rpc_server(
                 pid,
                 port,
                 expected_exit,
+                expected_comm: "rpc-server".to_string(),
+                expected_start_time: child_started_at,
                 _pidfile_guard: Some(pidfile_guard),
             });
         }
@@ -836,72 +833,112 @@ pub async fn start_rpc_server(
     );
 }
 
-async fn _terminate_process_internal(pid: u32) {
-    if !is_safe_kill_target(pid) {
-        tracing::error!(
-            "BUG: attempted to signal unsafe pid {pid} via internal terminate — refusing"
-        );
-        return;
-    }
-    let pid_str = pid.to_string();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessSignal {
+    Terminate,
+    Kill,
+}
 
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid_str])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid_str])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !alive {
-                return;
-            }
+pub(crate) fn send_signal_if_matches(
+    pid: u32,
+    expected_comm: &str,
+    expected_start_time: Option<i64>,
+    signal: ProcessSignal,
+) -> bool {
+    if !is_safe_kill_target(pid) {
+        tracing::error!("BUG: attempted to signal unsafe pid {pid} — refusing");
+        return false;
+    }
+
+    if let Some(expected_t) = expected_start_time {
+        if !crate::runtime::instance::validate::validate_pid_matches(pid, expected_comm, expected_t)
+        {
+            tracing::warn!("pid {pid} no longer matches expected identity, skipping signal");
+            return false;
         }
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid_str])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    } else {
+        let comm_ok = crate::runtime::instance::validate::process_comm(pid)
+            .ok()
+            .flatten()
+            .map(|comm| comm == expected_comm)
+            .unwrap_or(false);
+        if !comm_ok {
+            tracing::warn!("pid {pid} no longer matches {expected_comm}, skipping signal");
+            return false;
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(
+            pid as libc::pid_t,
+            match signal {
+                ProcessSignal::Terminate => libc::SIGTERM,
+                ProcessSignal::Kill => libc::SIGKILL,
+            },
+        );
     }
 
     #[cfg(windows)]
     {
-        // Graceful termination via taskkill (sends WM_CLOSE to the process tree)
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid_str, "/T"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let alive = std::process::Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {pid_str}"), "/NH"])
-                .output()
-                .map(|o| {
-                    o.status.success() && String::from_utf8_lossy(&o.stdout).contains(&pid_str)
-                })
-                .unwrap_or(false);
-            if !alive {
-                return;
-            }
+        let pid_str = pid.to_string();
+        let mut command = std::process::Command::new("taskkill");
+        command.args(["/PID", &pid_str, "/T"]);
+        if signal == ProcessSignal::Kill {
+            command.arg("/F");
         }
-        // Force-kill if still alive
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid_str, "/T", "/F"])
+        let _ = command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
+
+    true
+}
+
+pub(crate) fn terminate_process_blocking(
+    pid: u32,
+    expected_comm: &str,
+    expected_start_time: Option<i64>,
+) -> bool {
+    if !send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate) {
+        return false;
+    }
+
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if crate::runtime::instance::validate::process_liveness(pid)
+            == crate::runtime::instance::validate::Liveness::Dead
+        {
+            return true;
+        }
+    }
+
+    let _ = send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Kill);
+    true
+}
+
+async fn terminate_process_with_wait(
+    pid: u32,
+    expected_comm: &str,
+    expected_start_time: Option<i64>,
+    attempts: usize,
+    interval: std::time::Duration,
+) {
+    if !send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate) {
+        return;
+    }
+
+    for _ in 0..attempts {
+        tokio::time::sleep(interval).await;
+        if crate::runtime::instance::validate::process_liveness(pid)
+            == crate::runtime::instance::validate::Liveness::Dead
+        {
+            return;
+        }
+    }
+
+    let _ = send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Kill);
 }
 
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
@@ -1195,16 +1232,14 @@ pub async fn start_llama_server(
             if pid == 0 {
                 anyhow::bail!("llama-server returned PID 0 — refusing to proceed");
             }
-            let child_started_at: i64 =
-                crate::runtime::instance::validate::process_started_at_unix(pid)
-                    .unwrap_or(None)
-                    .unwrap_or(0);
+            let child_started_at = crate::runtime::instance::validate::process_started_at_unix(pid)
+                .unwrap_or(None);
             let owner_started_at: i64 =
                 crate::runtime::instance::validate::current_process_start_time_unix().unwrap_or(0);
             let metadata = crate::runtime::instance::PidfileMetadata {
                 cmd_name: "llama-server".to_string(),
                 child_pid: pid,
-                child_started_at_unix: child_started_at,
+                child_started_at_unix: child_started_at.unwrap_or(0),
                 owner_pid: std::process::id(),
                 owner_started_at_unix: owner_started_at,
                 argv_snippet: crate::runtime::instance::PidfileMetadata::cap_argv(
@@ -1218,6 +1253,8 @@ pub async fn start_llama_server(
             let handle = InferenceServerHandle {
                 pid,
                 expected_exit: expected_exit.clone(),
+                expected_comm: "llama-server".to_string(),
+                expected_start_time: child_started_at,
                 _pidfile_guard: Some(pidfile_guard),
             };
             let (death_tx, death_rx) = tokio::sync::oneshot::channel();
@@ -1281,34 +1318,7 @@ pub async fn terminate_process(
         tracing::error!("BUG: attempted to signal unsafe pid {pid} — refusing");
         return true;
     }
-    let comm_ok = crate::runtime::instance::validate::process_comm(pid)
-        .ok()
-        .flatten()
-        .map(|c| c == expected_comm)
-        .unwrap_or(false);
-    if !comm_ok {
-        tracing::warn!("pid {pid} no longer matches {expected_comm}, skipping terminate");
-        return true; // treat as already gone
-    }
-    if let Some(expected_t) = expected_start_time {
-        let start_ok = crate::runtime::instance::validate::process_started_at_unix(pid)
-            .ok()
-            .flatten()
-            .map(|t| {
-                (t - expected_t).abs()
-                    <= crate::runtime::instance::validate::START_TIME_TOLERANCE_SECS
-            })
-            .unwrap_or(false);
-        if !start_ok {
-            tracing::warn!("pid {pid} start_time mismatch, skipping terminate");
-            return true;
-        }
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: kill is safe with a valid pid
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
+    let _ = send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate);
     true
 }
 
@@ -1316,25 +1326,13 @@ pub async fn terminate_process(
 pub async fn force_kill_process(
     pid: u32,
     expected_comm: &str,
-    _expected_start_time: Option<i64>,
+    expected_start_time: Option<i64>,
 ) -> bool {
     if !is_safe_kill_target(pid) {
         tracing::error!("BUG: attempted to signal unsafe pid {pid} — refusing");
         return true;
     }
-    let comm_ok = crate::runtime::instance::validate::process_comm(pid)
-        .ok()
-        .flatten()
-        .map(|c| c == expected_comm)
-        .unwrap_or(false);
-    if !comm_ok {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: kill is safe with a valid pid
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    }
+    let _ = send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Kill);
     true
 }
 
@@ -1764,6 +1762,8 @@ No devices found
             pid: 12345,
             port: 8080,
             expected_exit: Arc::new(AtomicBool::new(false)),
+            expected_comm: "rpc-server".to_string(),
+            expected_start_time: Some(1700000000),
             _pidfile_guard: None,
         };
         assert!(handle.pid > 0);
@@ -1777,6 +1777,8 @@ No devices found
             pid: 999_999,
             port: 9999,
             expected_exit: flag.clone(),
+            expected_comm: "rpc-server".to_string(),
+            expected_start_time: Some(1700000000),
             _pidfile_guard: None,
         };
         assert!(!flag.load(Ordering::Relaxed));

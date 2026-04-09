@@ -8,7 +8,7 @@ mod network;
 mod plugin;
 mod plugins;
 mod protocol;
-pub mod runtime;
+mod runtime;
 mod system;
 
 pub mod proto {

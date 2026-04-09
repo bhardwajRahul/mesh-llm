@@ -1870,10 +1870,15 @@ async fn run_auto(
     // only as a fallback so the Drop chain still runs.
     for (_, controller) in managed_models.drain() {
         let _ = controller.stop_tx.send(true);
-        match tokio::time::timeout(std::time::Duration::from_secs(3), controller.task).await {
-            Ok(_) => {}
+        let mut task = controller.task;
+        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await {
+            Ok(join_result) => {
+                let _ = join_result;
+            }
             Err(_) => {
                 tracing::warn!("election task did not stop within 3s during shutdown");
+                task.abort();
+                let _ = task.await;
             }
         }
     }
@@ -1882,9 +1887,17 @@ async fn run_auto(
     node.set_hosted_models(Vec::new()).await;
     rpc_handle.shutdown().await;
     if let Some(rt) = runtime {
-        let dir = rt.dir().to_path_buf();
-        drop(rt);
-        let _ = std::fs::remove_dir_all(&dir);
+        let outstanding_refs = std::sync::Arc::strong_count(&rt);
+        if outstanding_refs == 1 {
+            let dir = rt.dir().to_path_buf();
+            drop(rt);
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            tracing::warn!(
+                outstanding_refs,
+                "skipping runtime directory removal during shutdown because runtime references remain"
+            );
+        }
     }
     Ok(())
 }

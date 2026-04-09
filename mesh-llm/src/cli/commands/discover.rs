@@ -1,6 +1,5 @@
 use anyhow::Result;
 
-#[cfg(windows)]
 use crate::inference::launch;
 use crate::mesh;
 use crate::network::nostr;
@@ -95,33 +94,26 @@ pub(crate) async fn run_discover(
 
 /// Drop a model from the mesh by sending a control request to the running instance.
 pub(crate) fn run_stop() -> Result<()> {
-    let mut killed = 0u32;
-    for name in &["llama-server", "rpc-server", "mesh-llm"] {
-        // Use pkill to terminate processes by name
-        #[cfg(windows)]
-        {
-            let image = launch::platform_bin_name(name);
-            if std::process::Command::new("taskkill")
-                .args(["/IM", &image])
-                .status()
-                .is_ok_and(|status| status.success())
-            {
-                eprintln!("🧹 Stopped {name}");
-                killed += 1;
-            }
+    let root = match crate::runtime::instance::runtime_root() {
+        Ok(root) => root,
+        Err(_) => {
+            eprintln!("Nothing running.");
+            return Ok(());
         }
-        #[cfg(not(windows))]
-        {
-            if std::process::Command::new("pkill")
-                .args(["-f", name])
-                .status()
-                .is_ok_and(|status| status.success())
-            {
-                eprintln!("🧹 Stopped {name}");
-                killed += 1;
-            }
+    };
+
+    let mut killed = 0u32;
+    for target in crate::runtime::instance::collect_runtime_stop_targets(&root)? {
+        if launch::terminate_process_blocking(
+            target.pid,
+            &target.expected_comm,
+            target.expected_start_time,
+        ) {
+            eprintln!("🧹 Stopped {}", target.label);
+            killed += 1;
         }
     }
+
     if killed == 0 {
         eprintln!("Nothing running.");
     }

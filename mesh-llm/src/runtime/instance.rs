@@ -56,6 +56,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -172,11 +173,13 @@ impl PidfileGuard {
 impl Drop for PidfileGuard {
     fn drop(&mut self) {
         if let Err(e) = fs::remove_file(&self.path) {
-            tracing::debug!(
-                path = %self.path.display(),
-                error = %e,
-                "failed to remove pidfile on drop"
-            );
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "failed to remove pidfile on drop"
+                );
+            }
         }
     }
 }
@@ -646,6 +649,31 @@ pub mod validate {
 pub mod reap {
     use super::validate;
     use super::PidfileMetadata;
+    use anyhow::Context;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug)]
+    enum PendingActionKind {
+        KillChildAndRemovePidfile {
+            child_pid: u32,
+            cmd_name: String,
+            child_started_at_unix: i64,
+        },
+        RemovePidfileOnly,
+    }
+
+    #[derive(Debug)]
+    struct PendingAction {
+        pidfile_path: PathBuf,
+        kind: PendingActionKind,
+    }
+
+    #[derive(Debug, Default)]
+    struct ScanResult {
+        summary: ReapSummary,
+        pending_actions: Vec<PendingAction>,
+        stale_runtime_dirs: Vec<PathBuf>,
+    }
 
     /// Decision returned by [`decide_action`].
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -732,116 +760,55 @@ pub mod reap {
             return Ok(ReapSummary::default());
         }
 
-        let entries = std::fs::read_dir(root)?;
-        let mut summary = ReapSummary::default();
+        let root = root.to_path_buf();
+        let my_runtime_dir = my_runtime_dir.to_path_buf();
+        let scan = tokio::task::spawn_blocking(move || scan_cross_runtime_orphans(&root, &my_runtime_dir))
+            .await
+            .context("cross-runtime reap scan task panicked")??;
 
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
+        let mut summary = scan.summary;
+        let pending_actions = scan.pending_actions;
+        let stale_runtime_dirs = scan.stale_runtime_dirs;
 
-            // Skip our own runtime directory (explicit path comparison — NOT flock).
-            if entry_path == my_runtime_dir {
-                continue;
-            }
-
-            let lock_path = entry_path.join("lock");
-            if super::is_locked(&lock_path) {
-                summary.dirs_skipped_alive += 1;
-                continue;
-            }
-
-            let pidfiles_dir = entry_path.join("pidfiles");
-            if let Ok(pidfiles) = std::fs::read_dir(&pidfiles_dir) {
-                for pidfile_entry in pidfiles.flatten() {
-                    let path = pidfile_entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                        continue;
-                    }
-
-                    let metadata = match super::PidfileMetadata::read(&path) {
-                        Ok(m) => m,
-                        Err(_) => {
-                            summary.skipped_errors += 1;
-                            continue;
-                        }
-                    };
-
-                    if metadata.child_pid == 0 || metadata.child_pid == 1 {
-                        tracing::warn!(
-                            "skipping pidfile with invalid child_pid={}",
-                            metadata.child_pid
-                        );
-                        let _ = std::fs::remove_file(&path);
-                        summary.pidfiles_removed += 1;
-                        continue;
-                    }
-
-                    let child_liveness = super::validate::process_liveness(metadata.child_pid);
-                    let child_comm_matches = super::validate::process_comm(metadata.child_pid)
-                        .ok()
-                        .flatten()
-                        .map(|c| c == metadata.cmd_name)
-                        .unwrap_or(false);
-                    let child_start_matches =
-                        super::validate::process_started_at_unix(metadata.child_pid)
-                            .ok()
-                            .flatten()
-                            .map(|t| {
-                                (t - metadata.child_started_at_unix).abs()
-                                    <= super::validate::START_TIME_TOLERANCE_SECS
-                            })
-                            .unwrap_or(false);
-
-                    let action = decide_action(
-                        &metadata,
-                        child_liveness,
-                        child_comm_matches,
-                        child_start_matches,
-                        false,
-                    );
-
-                    match action {
-                        Action::KillChildAndRemovePidfile => {
-                            crate::inference::launch::terminate_process(
-                                metadata.child_pid,
-                                &metadata.cmd_name,
-                                Some(metadata.child_started_at_unix),
-                            )
-                            .await;
-                            crate::inference::launch::wait_for_exit(metadata.child_pid, 5000).await;
-                            crate::inference::launch::force_kill_process(
-                                metadata.child_pid,
-                                &metadata.cmd_name,
-                                Some(metadata.child_started_at_unix),
-                            )
-                            .await;
-                            let _ = std::fs::remove_file(&path);
-                            summary.children_killed += 1;
-                            summary.pidfiles_removed += 1;
-                        }
-                        Action::RemovePidfileOnly => {
-                            let _ = std::fs::remove_file(&path);
-                            summary.pidfiles_removed += 1;
-                        }
-                        Action::Skip => {
-                            summary.skipped_errors += 1;
-                        }
-                        Action::Keep => {}
-                    }
+        for action in &pending_actions {
+            match &action.kind {
+                PendingActionKind::KillChildAndRemovePidfile {
+                    child_pid,
+                    cmd_name,
+                    child_started_at_unix,
+                } => {
+                    crate::inference::launch::terminate_process(
+                        *child_pid,
+                        cmd_name,
+                        Some(*child_started_at_unix),
+                    )
+                    .await;
+                    crate::inference::launch::wait_for_exit(*child_pid, 5000).await;
+                    crate::inference::launch::force_kill_process(
+                        *child_pid,
+                        cmd_name,
+                        Some(*child_started_at_unix),
+                    )
+                    .await;
+                    summary.children_killed += 1;
+                    summary.pidfiles_removed += 1;
+                }
+                PendingActionKind::RemovePidfileOnly => {
+                    summary.pidfiles_removed += 1;
                 }
             }
-
-            if std::fs::metadata(&entry_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| t.elapsed().unwrap_or_default().as_secs() > 3600)
-                .unwrap_or(false)
-            {
-                let _ = std::fs::remove_dir_all(&entry_path);
-                summary.dirs_gc_d += 1;
-            }
-
-            summary.dirs_scanned += 1;
         }
+
+        tokio::task::spawn_blocking(move || {
+            for action in pending_actions {
+                let _ = std::fs::remove_file(action.pidfile_path);
+            }
+            for path in stale_runtime_dirs {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        })
+        .await
+        .context("cross-runtime reap cleanup task panicked")?;
 
         Ok(summary)
     }
@@ -852,16 +819,106 @@ pub mod reap {
     /// If a child is alive and matches, it is killed (retry drain).
     /// If dead or mismatched, the pidfile is removed defensively.
     pub async fn reap_own_stale_pidfiles(my_dir: &std::path::Path) -> anyhow::Result<ReapSummary> {
-        let pidfiles_dir = my_dir.join("pidfiles");
-        if !pidfiles_dir.exists() {
+        let my_dir = my_dir.to_path_buf();
+        if !my_dir.join("pidfiles").exists() {
             return Ok(ReapSummary::default());
         }
 
-        let entries = std::fs::read_dir(&pidfiles_dir)?;
-        let mut summary = ReapSummary::default();
+        let scan = tokio::task::spawn_blocking(move || scan_own_stale_pidfiles(&my_dir))
+            .await
+            .context("own-runtime reap scan task panicked")??;
+
+        let mut summary = scan.summary;
+        let pending_actions = scan.pending_actions;
+
+        for action in &pending_actions {
+            match &action.kind {
+                PendingActionKind::KillChildAndRemovePidfile {
+                    child_pid,
+                    cmd_name,
+                    child_started_at_unix,
+                } => {
+                    crate::inference::launch::terminate_process(
+                        *child_pid,
+                        cmd_name,
+                        Some(*child_started_at_unix),
+                    )
+                    .await;
+                    crate::inference::launch::wait_for_exit(*child_pid, 5000).await;
+                    crate::inference::launch::force_kill_process(
+                        *child_pid,
+                        cmd_name,
+                        Some(*child_started_at_unix),
+                    )
+                    .await;
+                    summary.children_killed += 1;
+                    summary.pidfiles_removed += 1;
+                }
+                PendingActionKind::RemovePidfileOnly => {
+                    summary.pidfiles_removed += 1;
+                }
+            }
+        }
+
+        tokio::task::spawn_blocking(move || {
+            for action in pending_actions {
+                let _ = std::fs::remove_file(action.pidfile_path);
+            }
+        })
+        .await
+        .context("own-runtime reap cleanup task panicked")?;
+
+        Ok(summary)
+    }
+
+    fn scan_cross_runtime_orphans(root: &Path, my_runtime_dir: &Path) -> anyhow::Result<ScanResult> {
+        let mut result = ScanResult::default();
+        let entries = std::fs::read_dir(root)
+            .with_context(|| format!("failed to read runtime root: {}", root.display()))?;
 
         for entry in entries.flatten() {
-            let path = entry.path();
+            let entry_path = entry.path();
+
+            if entry_path == my_runtime_dir {
+                continue;
+            }
+
+            if super::is_locked(&entry_path.join("lock")) {
+                result.summary.dirs_skipped_alive += 1;
+                continue;
+            }
+
+            scan_pidfiles_dir(&entry_path.join("pidfiles"), false, &mut result);
+
+            if std::fs::metadata(&entry_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.elapsed().unwrap_or_default().as_secs() > 3600)
+                .unwrap_or(false)
+            {
+                result.stale_runtime_dirs.push(entry_path);
+                result.summary.dirs_gc_d += 1;
+            }
+
+            result.summary.dirs_scanned += 1;
+        }
+
+        Ok(result)
+    }
+
+    fn scan_own_stale_pidfiles(my_dir: &Path) -> anyhow::Result<ScanResult> {
+        let mut result = ScanResult::default();
+        scan_pidfiles_dir(&my_dir.join("pidfiles"), true, &mut result);
+        Ok(result)
+    }
+
+    fn scan_pidfiles_dir(pidfiles_dir: &Path, own_runtime: bool, result: &mut ScanResult) {
+        let Ok(pidfiles) = std::fs::read_dir(pidfiles_dir) else {
+            return;
+        };
+
+        for pidfile_entry in pidfiles.flatten() {
+            let path = pidfile_entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
@@ -869,7 +926,7 @@ pub mod reap {
             let metadata = match super::PidfileMetadata::read(&path) {
                 Ok(m) => m,
                 Err(_) => {
-                    summary.skipped_errors += 1;
+                    result.summary.skipped_errors += 1;
                     continue;
                 }
             };
@@ -879,8 +936,10 @@ pub mod reap {
                     "skipping pidfile with invalid child_pid={}",
                     metadata.child_pid
                 );
-                let _ = std::fs::remove_file(&path);
-                summary.pidfiles_removed += 1;
+                result.pending_actions.push(PendingAction {
+                    pidfile_path: path,
+                    kind: PendingActionKind::RemovePidfileOnly,
+                });
                 continue;
             }
 
@@ -899,35 +958,44 @@ pub mod reap {
                 })
                 .unwrap_or(false);
 
-            if child_liveness == super::validate::Liveness::Alive
-                && child_comm_matches
-                && child_start_matches
-            {
-                // This is OUR stale child from a previous failed spawn attempt — kill it.
-                crate::inference::launch::terminate_process(
-                    metadata.child_pid,
-                    &metadata.cmd_name,
-                    Some(metadata.child_started_at_unix),
-                )
-                .await;
-                crate::inference::launch::wait_for_exit(metadata.child_pid, 5000).await;
-                crate::inference::launch::force_kill_process(
-                    metadata.child_pid,
-                    &metadata.cmd_name,
-                    Some(metadata.child_started_at_unix),
-                )
-                .await;
-                let _ = std::fs::remove_file(&path);
-                summary.children_killed += 1;
-                summary.pidfiles_removed += 1;
+            let action = if own_runtime {
+                if child_liveness == super::validate::Liveness::Alive
+                    && child_comm_matches
+                    && child_start_matches
+                {
+                    Action::KillChildAndRemovePidfile
+                } else {
+                    Action::RemovePidfileOnly
+                }
             } else {
-                // Dead or mismatched PID — remove defensively.
-                let _ = std::fs::remove_file(&path);
-                summary.pidfiles_removed += 1;
+                decide_action(
+                    &metadata,
+                    child_liveness,
+                    child_comm_matches,
+                    child_start_matches,
+                    false,
+                )
+            };
+
+            match action {
+                Action::KillChildAndRemovePidfile => result.pending_actions.push(PendingAction {
+                    pidfile_path: path,
+                    kind: PendingActionKind::KillChildAndRemovePidfile {
+                        child_pid: metadata.child_pid,
+                        cmd_name: metadata.cmd_name,
+                        child_started_at_unix: metadata.child_started_at_unix,
+                    },
+                }),
+                Action::RemovePidfileOnly => result.pending_actions.push(PendingAction {
+                    pidfile_path: path,
+                    kind: PendingActionKind::RemovePidfileOnly,
+                }),
+                Action::Skip => {
+                    result.summary.skipped_errors += 1;
+                }
+                Action::Keep => {}
             }
         }
-
-        Ok(summary)
     }
 }
 
@@ -955,6 +1023,120 @@ struct OwnerMetadata {
     api_port: Option<u16>,
     version: Option<String>,
     started_at_unix: Option<i64>,
+    mesh_llm_binary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeProcessTarget {
+    pub label: String,
+    pub pid: u32,
+    pub expected_comm: String,
+    pub expected_start_time: Option<i64>,
+}
+
+fn binary_process_name(binary: &str) -> Option<String> {
+    let path = Path::new(binary);
+
+    #[cfg(windows)]
+    {
+        path.file_stem().map(|name| name.to_string_lossy().into_owned())
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.file_name().map(|name| name.to_string_lossy().into_owned())
+    }
+}
+
+pub(crate) fn collect_runtime_stop_targets(root: &Path) -> anyhow::Result<Vec<RuntimeProcessTarget>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut targets = Vec::new();
+
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("failed to read runtime root: {}", root.display()))?
+        .flatten()
+    {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let pidfiles_dir = entry_path.join("pidfiles");
+        if let Ok(pidfiles) = fs::read_dir(&pidfiles_dir) {
+            for pidfile_entry in pidfiles.flatten() {
+                let pidfile_path = pidfile_entry.path();
+                if pidfile_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+
+                let metadata = match PidfileMetadata::read(&pidfile_path) {
+                    Ok(metadata) => metadata,
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %pidfile_path.display(),
+                            error = %err,
+                            "failed to parse pidfile while collecting stop targets"
+                        );
+                        continue;
+                    }
+                };
+
+                targets.push(RuntimeProcessTarget {
+                    label: metadata.cmd_name.clone(),
+                    pid: metadata.child_pid,
+                    expected_comm: metadata.cmd_name,
+                    expected_start_time: Some(metadata.child_started_at_unix),
+                });
+            }
+        }
+
+        let owner_path = entry_path.join("owner.json");
+        if !owner_path.exists() {
+            continue;
+        }
+
+        let owner_json = match fs::read_to_string(&owner_path) {
+            Ok(owner_json) => owner_json,
+            Err(err) => {
+                tracing::warn!(
+                    path = %owner_path.display(),
+                    error = %err,
+                    "failed to read owner.json while collecting stop targets"
+                );
+                continue;
+            }
+        };
+
+        let owner: OwnerMetadata = match serde_json::from_str(&owner_json) {
+            Ok(owner) => owner,
+            Err(err) => {
+                tracing::warn!(
+                    path = %owner_path.display(),
+                    error = %err,
+                    "failed to parse owner.json while collecting stop targets"
+                );
+                continue;
+            }
+        };
+
+        let expected_comm = owner
+            .mesh_llm_binary
+            .as_deref()
+            .and_then(binary_process_name)
+            .unwrap_or_else(|| "mesh-llm".to_string());
+
+        targets.push(RuntimeProcessTarget {
+            label: expected_comm.clone(),
+            pid: owner.pid,
+            expected_comm,
+            expected_start_time: owner.started_at_unix,
+        });
+    }
+
+    Ok(targets)
 }
 
 /// Scan `root` for live co-located mesh-llm instances.
