@@ -1,29 +1,25 @@
 /**
- * PDF text extraction via pdf.js, loaded lazily from CDN.
+ * PDF text extraction via pdf.js, loaded lazily from the app bundle.
  *
- * Only fetched when a user actually attaches a PDF — zero bundle cost
- * otherwise.  Falls back gracefully if the CDN is unreachable (offline,
- * air-gapped network, etc.).
+ * Only loaded when a user actually attaches a PDF, so initial bundle cost
+ * stays low while avoiding runtime execution of third-party CDN code.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-const PDFJS_CDN =
-  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
-const PDFJS_WORKER_CDN =
-  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+import pdfjsWorkerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 let pdfjsLib: any | null = null;
 
 async function loadPdfJs(): Promise<any> {
   if (pdfjsLib) return pdfjsLib;
   try {
-    pdfjsLib = await import(/* @vite-ignore */ PDFJS_CDN);
-    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+    pdfjsLib = await import("pdfjs-dist");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerSrc;
     return pdfjsLib;
   } catch {
     throw new Error(
-      "Could not load PDF.js. Check your network connection.",
+      "Could not load PDF.js. Check that the application assets are available.",
     );
   }
 }
@@ -49,35 +45,51 @@ export async function extractPdfText(
   buffer: ArrayBuffer,
 ): Promise<PdfExtractionResult> {
   const lib = await loadPdfJs();
-  const doc = await lib.getDocument({ data: new Uint8Array(buffer) }).promise;
-  const pageCount: number = doc.numPages;
+  let doc: any | null = null;
 
-  const pages: string[] = [];
-  let pagesWithText = 0;
+  try {
+    doc = await lib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const pageCount: number = doc.numPages;
 
-  for (let i = 1; i <= pageCount; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    const items: Array<{ str: string; hasEOL?: boolean }> = content.items;
+    const pages: string[] = [];
+    let pagesWithText = 0;
 
-    // Join text items, respecting line breaks the PDF declares.
-    let pageText = "";
-    for (const item of items) {
-      pageText += item.str;
-      if (item.hasEOL) pageText += "\n";
+    for (let i = 1; i <= pageCount; i++) {
+      const page = await doc.getPage(i);
+      try {
+        const content = await page.getTextContent();
+        const items = content.items;
+
+        // Join text items, respecting line breaks the PDF declares.
+        // Guard against non-text entries (e.g. marked-content items) that
+        // lack a `str` field.
+        let pageText = "";
+        for (const item of items) {
+          if (typeof (item as any).str === "string") {
+            pageText += (item as any).str;
+            if ((item as any).hasEOL) pageText += "\n";
+          }
+        }
+
+        const trimmed = pageText.trim();
+        if (trimmed.length > 0) {
+          pagesWithText++;
+          pages.push(`--- Page ${i} ---\n${trimmed}`);
+        }
+      } finally {
+        page.cleanup();
+      }
     }
 
-    const trimmed = pageText.trim();
-    if (trimmed.length > 0) {
-      pagesWithText++;
-      pages.push(`--- Page ${i} ---\n${trimmed}`);
+    const text = pages.join("\n\n");
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+    return { text, pageCount, pagesWithText, wordCount };
+  } finally {
+    if (doc) {
+      await doc.destroy();
     }
   }
-
-  const text = pages.join("\n\n");
-  const wordCount = text.split(/\s+/).filter(Boolean).length;
-
-  return { text, pageCount, pagesWithText, wordCount };
 }
 
 /**
@@ -94,26 +106,31 @@ export async function renderPdfPagesToImages(
 ): Promise<string[]> {
   const lib = await loadPdfJs();
   const doc = await lib.getDocument({ data: new Uint8Array(buffer) }).promise;
-  const pageCount: number = doc.numPages;
-  const maxPages = opts?.maxPages ?? 10;
-  const scale = opts?.scale ?? 1.5; // ~150 DPI for typical PDFs
-  const quality = opts?.quality ?? 0.85;
 
-  const images: string[] = [];
+  try {
+    const pageCount: number = doc.numPages;
+    const maxPages = opts?.maxPages ?? 10;
+    const scale = opts?.scale ?? 1.5; // ~150 DPI for typical PDFs
+    const quality = opts?.quality ?? 0.85;
 
-  for (let i = 1; i <= Math.min(pageCount, maxPages); i++) {
-    const page = await doc.getPage(i);
-    const viewport = page.getViewport({ scale });
-    const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) continue;
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    images.push(canvas.toDataURL("image/jpeg", quality));
+    const images: string[] = [];
+
+    for (let i = 1; i <= Math.min(pageCount, maxPages); i++) {
+      const page = await doc.getPage(i);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      images.push(canvas.toDataURL("image/jpeg", quality));
+    }
+
+    return images;
+  } finally {
+    await doc.destroy();
   }
-
-  return images;
 }
 
 /**

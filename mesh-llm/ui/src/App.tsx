@@ -674,6 +674,21 @@ function sanitizeAttachment(raw: unknown): ChatAttachment | null {
         ? item.status
         : undefined,
     error: typeof item.error === "string" ? item.error : undefined,
+    extractedText:
+      typeof item.extractedText === "string" ? item.extractedText : undefined,
+    extractionSummary:
+      typeof item.extractionSummary === "string"
+        ? item.extractionSummary
+        : undefined,
+    renderedPageImages:
+      Array.isArray(item.renderedPageImages) &&
+      item.renderedPageImages.every((v) => typeof v === "string")
+        ? (item.renderedPageImages as string[])
+        : undefined,
+    imageDescription:
+      typeof item.imageDescription === "string"
+        ? item.imageDescription
+        : undefined,
   };
 }
 
@@ -1876,17 +1891,7 @@ export function App() {
       model,
       attachments:
         pendingAttachments.length > 0
-          ? pendingAttachments.map(
-              ({
-                status,
-                error,
-                extractedText,
-                extractionSummary,
-                renderedPageImages,
-                imageDescription,
-                ...attachment
-              }) => attachment,
-            )
+          ? pendingAttachments.map(({ status, error, ...attachment }) => attachment)
           : undefined,
     };
     const requestId = randomId();
@@ -3117,7 +3122,13 @@ export function ChatPage(props: {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      if (isPdfMimeType(mimeType)) {
+      // Detect PDFs by MIME type, data URL content type, or file extension —
+      // file.type can be empty in some browsers/OSes for PDF files.
+      const detectedMime = parseDataUrl(dataUrl)?.mimeType ?? mimeType;
+      const isPdf =
+        isPdfMimeType(detectedMime) ||
+        file.name.toLowerCase().endsWith(".pdf");
+      if (isPdf) {
         handlePdfAttachment(dataUrl, file.name);
       } else {
         addPendingAttachment({

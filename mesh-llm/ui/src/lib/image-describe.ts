@@ -1,9 +1,10 @@
 /**
  * Browser-side image description via Transformers.js + Florence-2.
  *
- * Lazy-loads the library from CDN on first use — zero bundle cost.
- * The model (~230MB quantized) is fetched from Hugging Face and cached
- * in the browser's Cache API / IndexedDB for instant subsequent loads.
+ * Lazy-loads the library from the app bundle on first use — zero bundle cost
+ * until the feature is actually used. The model (~230MB quantized) is fetched
+ * from Hugging Face and cached in the browser's Cache API / IndexedDB for
+ * instant subsequent loads.
  *
  * Used as a fallback when the user attaches an image but no vision
  * model is warm in the mesh — we describe the image locally and inject
@@ -12,13 +13,10 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-const TRANSFORMERS_CDN =
-  "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
-
-const MODEL_ID = "onnx-community/Florence-2-base-ft";
-
 let pipelineCache: any | null = null;
 let loadingPromise: Promise<any> | null = null;
+
+const MODEL_ID = "onnx-community/Florence-2-base-ft";
 
 /**
  * Load transformers.js and initialize the Florence-2 pipeline.
@@ -31,7 +29,7 @@ async function getDescriptionPipeline(): Promise<any> {
   loadingPromise = (async () => {
     try {
       const { Florence2ForConditionalGeneration, AutoProcessor, AutoTokenizer, RawImage } =
-        await import(/* @vite-ignore */ TRANSFORMERS_CDN);
+        await import("@huggingface/transformers");
 
       const [model, processor, tokenizer] = await Promise.all([
         Florence2ForConditionalGeneration.from_pretrained(MODEL_ID, {
