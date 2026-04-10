@@ -255,28 +255,29 @@ async fn read_http_request_with_limits(
     let rewritten_body = if requires_json_transform {
         body_json = serde_json::from_slice(&body).ok();
         if let Some(body_json) = body_json.as_mut() {
-        let normalization = normalize_openai_compat_request(&parsed.path, body_json)?;
-        let mut changed = normalization.changed;
-        if let Some(rewritten_path) = normalization.rewritten_path {
-            request_path = rewritten_path;
-        }
-        response_adapter = normalization.response_adapter;
-        if let Some(plugin_manager) = plugin_manager {
-            let resolved_request_ids =
-                resolve_request_object_references(&request_path, body_json, plugin_manager).await?;
-            if !resolved_request_ids.is_empty() {
-                request_object_request_ids = resolved_request_ids;
-                changed = true;
+            let normalization = normalize_openai_compat_request(&parsed.path, body_json)?;
+            let mut changed = normalization.changed;
+            if let Some(rewritten_path) = normalization.rewritten_path {
+                request_path = rewritten_path;
             }
-        }
-        if changed {
-            Some(
-                serde_json::to_vec(body_json)
-                    .context("serialize normalized OpenAI-compatible request body")?,
-            )
-        } else {
-            None
-        }
+            response_adapter = normalization.response_adapter;
+            if let Some(plugin_manager) = plugin_manager {
+                let resolved_request_ids =
+                    resolve_request_object_references(&request_path, body_json, plugin_manager)
+                        .await?;
+                if !resolved_request_ids.is_empty() {
+                    request_object_request_ids = resolved_request_ids;
+                    changed = true;
+                }
+            }
+            if changed {
+                Some(
+                    serde_json::to_vec(body_json)
+                        .context("serialize normalized OpenAI-compatible request body")?,
+                )
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -508,11 +509,7 @@ fn try_decode_chunked_body(buf: &[u8], max_body_bytes: usize) -> Result<Option<(
     }
 }
 
-fn request_requires_json_transform(
-    path: &str,
-    body: &[u8],
-    plugin_manager_present: bool,
-) -> bool {
+fn request_requires_json_transform(path: &str, body: &[u8], plugin_manager_present: bool) -> bool {
     let path_only = path.split('?').next().unwrap_or(path);
     if body.is_empty() {
         return false;
@@ -1826,7 +1823,8 @@ pub async fn handle_mesh_request(
         })
         .collect();
     let target_hosts = if let Some(name) = effective_model.as_deref() {
-        let ordered = order_remote_hosts_by_context(&node, name, required_tokens, &target_hosts).await;
+        let ordered =
+            order_remote_hosts_by_context(&node, name, required_tokens, &target_hosts).await;
         if let (Some(prefix_hash), Some(cached_target)) =
             (prepared.learn_prefix_hash, prepared.cached_target.as_ref())
         {
