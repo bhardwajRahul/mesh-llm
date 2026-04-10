@@ -762,8 +762,8 @@ pub async fn start_rpc_server(
     if pid == 0 {
         anyhow::bail!("rpc-server returned PID 0 — refusing to proceed");
     }
-    let child_started_at = crate::runtime::instance::validate::process_started_at_unix(pid)
-        .unwrap_or(None);
+    let child_started_at =
+        crate::runtime::instance::validate::process_started_at_unix(pid).unwrap_or(None);
     let owner_started_at: i64 =
         crate::runtime::instance::validate::current_process_start_time_unix().unwrap_or(0);
     let metadata = crate::runtime::instance::PidfileMetadata {
@@ -901,7 +901,12 @@ pub(crate) fn terminate_process_blocking(
     expected_comm: &str,
     expected_start_time: Option<i64>,
 ) -> bool {
-    if !send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate) {
+    if !send_signal_if_matches(
+        pid,
+        expected_comm,
+        expected_start_time,
+        ProcessSignal::Terminate,
+    ) {
         return false;
     }
 
@@ -925,7 +930,12 @@ async fn terminate_process_with_wait(
     attempts: usize,
     interval: std::time::Duration,
 ) {
-    if !send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate) {
+    if !send_signal_if_matches(
+        pid,
+        expected_comm,
+        expected_start_time,
+        ProcessSignal::Terminate,
+    ) {
         return;
     }
 
@@ -1019,7 +1029,7 @@ pub async fn start_llama_server(
     let vram_after_model = my_vram.saturating_sub(host_model_bytes);
     let ctx_size = compute_context_size(ctx_size_override, model_bytes, my_vram, total_group_vram);
     tracing::info!(
-        "Context size: {ctx_size} tokens (model {:.1}GB, host weights ~{:.1}GB, {:.0}GB VRAM, {:.1}GB free{})",
+        "Context size: {ctx_size} tokens (model {:.1}GB, host weights ~{:.1}GB, {:.0}GB capacity, {:.1}GB free{})",
         model_bytes as f64 / GB as f64,
         host_model_bytes as f64 / GB as f64,
         my_vram as f64 / GB as f64,
@@ -1232,8 +1242,8 @@ pub async fn start_llama_server(
             if pid == 0 {
                 anyhow::bail!("llama-server returned PID 0 — refusing to proceed");
             }
-            let child_started_at = crate::runtime::instance::validate::process_started_at_unix(pid)
-                .unwrap_or(None);
+            let child_started_at =
+                crate::runtime::instance::validate::process_started_at_unix(pid).unwrap_or(None);
             let owner_started_at: i64 =
                 crate::runtime::instance::validate::current_process_start_time_unix().unwrap_or(0);
             let metadata = crate::runtime::instance::PidfileMetadata {
@@ -1318,7 +1328,12 @@ pub async fn terminate_process(
         tracing::error!("BUG: attempted to signal unsafe pid {pid} — refusing");
         return true;
     }
-    let _ = send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Terminate);
+    let _ = send_signal_if_matches(
+        pid,
+        expected_comm,
+        expected_start_time,
+        ProcessSignal::Terminate,
+    );
     true
 }
 
