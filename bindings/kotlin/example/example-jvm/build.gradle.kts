@@ -3,7 +3,7 @@ plugins {
     application
 }
 
-group = "ai.meshllm.smoke"
+group = "ai.meshllm.example"
 version = "0.1.0"
 
 repositories {
@@ -25,5 +25,5 @@ sourceSets {
 }
 
 application {
-    mainClass.set("ai.meshllm.smoke.SmokeMainKt")
+    mainClass.set("ai.meshllm.example.ExampleMainKt")
 }

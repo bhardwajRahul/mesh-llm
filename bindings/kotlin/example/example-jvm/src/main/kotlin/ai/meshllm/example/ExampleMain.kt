@@ -1,4 +1,4 @@
-package ai.meshllm.smoke
+package ai.meshllm.example
 
 import ai.meshllm.ChatMessage
 import ai.meshllm.ChatRequest
@@ -64,8 +64,8 @@ fun main(args: Array<String>) = runBlocking {
     val inviteToken = args.firstOrNull { !it.startsWith("--") }
 
     if (!isMock && inviteToken == null) {
-        System.err.println("Usage: SmokeMain <invite_token>")
-        System.err.println("       SmokeMain --mock")
+        System.err.println("Usage: ExampleMain <invite_token>")
+        System.err.println("       ExampleMain --mock")
         System.exit(1)
     }
 

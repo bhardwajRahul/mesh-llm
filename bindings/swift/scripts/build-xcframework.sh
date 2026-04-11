@@ -3,11 +3,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SWIFT_DIR="$REPO_ROOT/bindings/swift"
+FFI_DIR="$SWIFT_DIR/Generated/FFI"
 TARGET_DIR="$REPO_ROOT/target"
-XCFRAMEWORK_DIR="$TARGET_DIR/xcframework"
-FRAMEWORK_NAME="MeshLLM"
+XCFRAMEWORK_DIR="$SWIFT_DIR/Generated"
+FRAMEWORK_NAME="mesh_ffiFFI"
 
-echo "Building MeshLLM XCFramework..."
+echo "Building $FRAMEWORK_NAME XCFramework..."
 echo "Repo root: $REPO_ROOT"
 
 if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-ffi"'; then
@@ -16,6 +17,8 @@ if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"
 fi
 
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin 2>/dev/null || true
+
+"$SWIFT_DIR/scripts/generate-swift-bindings.sh"
 
 # Resolve stable rustc from rustup (avoids Homebrew rustc shadowing)
 RUSTUP_RUSTC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
@@ -59,6 +62,8 @@ create_framework() {
 
   # Copy static library as the framework binary (no extension)
   cp "$LIB_PATH" "$FRAMEWORK_DIR/$FRAMEWORK_NAME"
+  cp "$FFI_DIR/mesh_ffiFFI.h" "$FRAMEWORK_DIR/Headers/mesh_ffiFFI.h"
+  cp "$FFI_DIR/mesh_ffiFFI.modulemap" "$FRAMEWORK_DIR/Modules/module.modulemap"
 
   # Embed PrivacyInfo.xcprivacy (required for App Store submission)
   if [ -f "$SWIFT_DIR/PrivacyInfo.xcprivacy" ]; then
@@ -75,9 +80,9 @@ create_framework() {
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>ai.meshllm.MeshLLM</string>
+    <string>ai.meshllm.mesh_ffiFFI</string>
     <key>CFBundleName</key>
-    <string>MeshLLM</string>
+    <string>mesh_ffiFFI</string>
     <key>CFBundlePackageType</key>
     <string>FMWK</string>
     <key>CFBundleVersion</key>
@@ -87,15 +92,6 @@ create_framework() {
 </dict>
 </plist>
 PLIST
-
-  # Module map so Swift/ObjC can import the framework
-  cat > "$FRAMEWORK_DIR/Modules/module.modulemap" << 'MODULEMAP'
-framework module MeshLLM {
-    umbrella header "MeshLLM.h"
-    export *
-    module * { export * }
-}
-MODULEMAP
 
   echo "  Created framework bundle for $ARCH"
 }
@@ -136,11 +132,11 @@ if [ ! -d "$XCFW_OUT" ]; then
     <array>
         <dict>
             <key>BinaryPath</key>
-            <string>MeshLLM.framework/MeshLLM</string>
+            <string>mesh_ffiFFI.framework/mesh_ffiFFI</string>
             <key>LibraryIdentifier</key>
             <string>ios-arm64</string>
             <key>LibraryPath</key>
-            <string>MeshLLM.framework</string>
+            <string>mesh_ffiFFI.framework</string>
             <key>SupportedArchitectures</key>
             <array><string>arm64</string></array>
             <key>SupportedPlatform</key>
@@ -148,11 +144,11 @@ if [ ! -d "$XCFW_OUT" ]; then
         </dict>
         <dict>
             <key>BinaryPath</key>
-            <string>MeshLLM.framework/MeshLLM</string>
+            <string>mesh_ffiFFI.framework/mesh_ffiFFI</string>
             <key>LibraryIdentifier</key>
             <string>ios-arm64_x86_64-simulator</string>
             <key>LibraryPath</key>
-            <string>MeshLLM.framework</string>
+            <string>mesh_ffiFFI.framework</string>
             <key>SupportedArchitectures</key>
             <array><string>arm64</string><string>x86_64</string></array>
             <key>SupportedPlatform</key>
@@ -162,11 +158,11 @@ if [ ! -d "$XCFW_OUT" ]; then
         </dict>
         <dict>
             <key>BinaryPath</key>
-            <string>MeshLLM.framework/MeshLLM</string>
+            <string>mesh_ffiFFI.framework/mesh_ffiFFI</string>
             <key>LibraryIdentifier</key>
             <string>macos-arm64</string>
             <key>LibraryPath</key>
-            <string>MeshLLM.framework</string>
+            <string>mesh_ffiFFI.framework</string>
             <key>SupportedArchitectures</key>
             <array><string>arm64</string></array>
             <key>SupportedPlatform</key>

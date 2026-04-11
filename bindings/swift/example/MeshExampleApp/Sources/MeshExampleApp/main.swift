@@ -18,7 +18,7 @@ if isMock {
     exit(0)
 }
 
-let token = inviteTokenArg ?? "smoke-test-token"
+let token = inviteTokenArg ?? "example-test-token"
 let client = MeshClient(inviteToken: InviteToken(token))
 
 print("[connected]")

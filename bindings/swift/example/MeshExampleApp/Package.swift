@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "MeshSmokeApp",
+    name: "MeshExampleApp",
     platforms: [
         .macOS(.v13),
     ],
@@ -11,11 +11,11 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "MeshSmokeApp",
+            name: "MeshExampleApp",
             dependencies: [
                 .product(name: "MeshLLM", package: "swift"),
             ],
-            path: "Sources/MeshSmokeApp"
+            path: "Sources/MeshExampleApp"
         ),
     ]
 )
