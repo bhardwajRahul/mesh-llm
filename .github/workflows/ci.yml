@@ -352,10 +352,10 @@ jobs:
 
   macos:
     needs: changes
-    # Disabled until macOS CI runners are available. Apple build/package work
-    # should move to Linux cross-build instead.
-    if: ${{ false }}
-    runs-on: macos-latest
+    # Despite the legacy job name, this lane cross-compiles Apple artifacts on
+    # Linux and does not require a macOS runner.
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -371,6 +371,9 @@ jobs:
       - name: Build UI
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
 
       # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
@@ -415,7 +418,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_OPENSSL=OFF \
             "${CACHE_FLAGS[@]}"
-          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu) --target rpc-server llama-server llama-moe-analyze llama-moe-split
+          cmake --build llama.cpp/build --config Release -j$(nproc) --target rpc-server llama-server llama-moe-analyze llama-moe-split
 
       # ── Download model ──
       - name: Cache model
