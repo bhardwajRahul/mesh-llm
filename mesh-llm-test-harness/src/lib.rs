@@ -108,10 +108,10 @@ fn wait_for_status(port: u16, timeout: Duration) -> Result<String, FixtureError>
                 let body: serde_json::Value = resp
                     .json()
                     .map_err(|e| FixtureError::InvalidStatusResponse(e.to_string()))?;
-                let token = body["invite_token"]
+                let token = body["token"]
                     .as_str()
                     .ok_or_else(|| {
-                        FixtureError::InvalidStatusResponse("missing invite_token".into())
+                        FixtureError::InvalidStatusResponse("missing token".into())
                     })?
                     .to_string();
                 return Ok(token);

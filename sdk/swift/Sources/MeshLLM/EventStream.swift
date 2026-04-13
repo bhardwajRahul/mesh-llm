@@ -118,16 +118,15 @@ public final class EventStreamBridge: @unchecked Sendable {
             stateLock.unlock()
             return
         }
-        stateLock.unlock()
 
         switch event {
         case .completed, .failed, .disconnected:
-            continuation.yield(event)
-            continuation.finish()
-            stateLock.lock()
             finished = true
             stateLock.unlock()
+            continuation.yield(event)
+            continuation.finish()
         default:
+            stateLock.unlock()
             continuation.yield(event)
         }
     }

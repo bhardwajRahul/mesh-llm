@@ -110,7 +110,7 @@ val buildNativeLibs by tasks.registering {
     )
 }
 
-tasks.named("build") {
+tasks.named("assembleAar") {
     dependsOn(buildNativeLibs)
 }
 
