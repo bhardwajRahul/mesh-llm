@@ -170,7 +170,7 @@ jobs:
           summarize_json() {
             local label="$1"
             local file="$2"
-            python3 -c 'import json, sys; label=sys.argv[1]; path=sys.argv[2]; data=json.load(open(path, "r", encoding="utf-8")); caches=data.get("actions_caches", []); print(f"[{label}] total_count={data.get(\"total_count\", 0)}"); [print(json.dumps({"id": cache.get("id"), "key": cache.get("key"), "ref": cache.get("ref"), "created_at": cache.get("created_at"), "last_accessed_at": cache.get("last_accessed_at"), "size_in_bytes": cache.get("size_in_bytes"), "version": cache.get("version")}, sort_keys=True)) for cache in caches]' "$label" "$file"
+            python3 -c 'import json, sys; label=sys.argv[1]; path=sys.argv[2]; data=json.load(open(path, "r", encoding="utf-8")); caches=data.get("actions_caches", []); print("[" + label + "] total_count=" + str(data.get("total_count", 0))); [print(json.dumps({"id": cache.get("id"), "key": cache.get("key"), "ref": cache.get("ref"), "created_at": cache.get("created_at"), "last_accessed_at": cache.get("last_accessed_at"), "size_in_bytes": cache.get("size_in_bytes"), "version": cache.get("version")}, sort_keys=True)) for cache in caches]' "$label" "$file"
           }
 
           query_cache_list() {
@@ -246,7 +246,7 @@ jobs:
           summarize_json() {
             local label="$1"
             local file="$2"
-            python3 -c 'import json, sys; label=sys.argv[1]; path=sys.argv[2]; data=json.load(open(path, "r", encoding="utf-8")); caches=data.get("actions_caches", []); print(f"[{label}] total_count={data.get(\"total_count\", 0)}"); [print(json.dumps({"id": cache.get("id"), "key": cache.get("key"), "ref": cache.get("ref"), "created_at": cache.get("created_at"), "last_accessed_at": cache.get("last_accessed_at"), "size_in_bytes": cache.get("size_in_bytes"), "version": cache.get("version")}, sort_keys=True)) for cache in caches]' "$label" "$file"
+            python3 -c 'import json, sys; label=sys.argv[1]; path=sys.argv[2]; data=json.load(open(path, "r", encoding="utf-8")); caches=data.get("actions_caches", []); print("[" + label + "] total_count=" + str(data.get("total_count", 0))); [print(json.dumps({"id": cache.get("id"), "key": cache.get("key"), "ref": cache.get("ref"), "created_at": cache.get("created_at"), "last_accessed_at": cache.get("last_accessed_at"), "size_in_bytes": cache.get("size_in_bytes"), "version": cache.get("version")}, sort_keys=True)) for cache in caches]' "$label" "$file"
           }
 
           query_cache_list() {
