@@ -109,6 +109,7 @@ jobs:
         with:
           workspaces: . -> target
           prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ hashFiles('.github/cache-version.txt') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Early-fail gate: runs before expensive compile/test work.
       - name: Check formatting
@@ -238,6 +239,7 @@ jobs:
         with:
           workspaces: . -> target
           prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ hashFiles('.github/cache-version.txt') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Early-fail gate: runs before expensive compile/test work.
       - name: Check formatting
@@ -281,7 +283,7 @@ jobs:
       - name: Cache model
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         id: cache-model
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ~/.models/${{ env.MODEL_FILE }}
           key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt', '.github/workflows/ci.yml') }}
@@ -292,6 +294,13 @@ jobs:
           mkdir -p ~/.models
           curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
           ls -lh ~/.models/$MODEL_FILE
+
+      - name: Save model cache
+        if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true') && steps.cache-model.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.models/${{ env.MODEL_FILE }}
+          key: ${{ steps.cache-model.outputs.cache-primary-key }}
 
       # ── Integration smoke test ──
       - name: Smoke test (real inference)
@@ -314,7 +323,7 @@ jobs:
       - name: Cache MoE model
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         id: cache-moe-model
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ~/.models/${{ env.MOE_MODEL_FILE }}
           key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-model-${{ env.MOE_MODEL_FILE }}-${{ hashFiles('.github/cache-version.txt', '.github/workflows/ci.yml') }}
@@ -325,6 +334,13 @@ jobs:
           mkdir -p ~/.models
           curl -fSL "$MOE_MODEL_URL" -o ~/.models/$MOE_MODEL_FILE
           ls -lh ~/.models/$MOE_MODEL_FILE
+
+      - name: Save MoE model cache
+        if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true') && steps.cache-moe-model.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.models/${{ env.MOE_MODEL_FILE }}
+          key: ${{ steps.cache-moe-model.outputs.cache-primary-key }}
 
       - name: MoE split test (expert sharding)
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
@@ -440,6 +456,7 @@ jobs:
           workspaces: |
             . -> target
           prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ hashFiles('.github/cache-version.txt') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # ── Cross-PR llama.cpp / CUDA slim artifact cache (read-only consumer) ──
       #
@@ -657,6 +674,7 @@ jobs:
           workspaces: |
             . -> target
           prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ hashFiles('.github/cache-version.txt') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Resolve llama.cpp upstream SHA
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' }}
