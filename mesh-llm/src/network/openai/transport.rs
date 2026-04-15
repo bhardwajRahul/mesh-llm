@@ -29,6 +29,7 @@ const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
 const MAX_OBJECT_UPLOAD_CHUNKED_WIRE_BYTES: usize = MAX_OBJECT_UPLOAD_BODY_BYTES * 6 + 64 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_RESPONSE_BODY_PREVIEW_BYTES: usize = 4 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 256 * 1024;
 const REQUEST_TOKEN_MARGIN: u32 = 256;
 
 #[derive(Debug, Clone, Copy)]
@@ -1322,6 +1323,26 @@ fn remap_error_http_response(
     Some(response)
 }
 
+fn oversized_error_http_response(status_code: u16) -> Vec<u8> {
+    let body = serde_json::json!({
+        "error": {
+            "message": "upstream error response exceeded proxy limit",
+            "type": "server_error",
+            "param": serde_json::Value::Null,
+            "code": "upstream_error_too_large",
+        }
+    })
+    .to_string();
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status_code,
+        reason_phrase(status_code),
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
 async fn relay_error_response<R: AsyncRead + Unpin>(
     tcp_stream: &mut TcpStream,
     reader: &mut R,
@@ -1330,11 +1351,20 @@ async fn relay_error_response<R: AsyncRead + Unpin>(
     let status_code = probe.status_code;
     let header_end = probe.header_end;
     let mut buffered = probe.buffered;
-    if let Err(err) = reader.read_to_end(&mut buffered).await {
+    let mut limited = reader.take((MAX_ERROR_RESPONSE_BYTES + 1) as u64);
+    if let Err(err) = limited.read_to_end(&mut buffered).await {
         tracing::debug!("error response relay read ended before EOF: {err}");
     }
-    let outgoing =
-        remap_error_http_response(status_code, header_end, &buffered).unwrap_or(buffered);
+    let outgoing = if buffered.len().saturating_sub(header_end) > MAX_ERROR_RESPONSE_BYTES {
+        tracing::warn!(
+            "upstream error body exceeded {} bytes for status {}",
+            MAX_ERROR_RESPONSE_BYTES,
+            status_code
+        );
+        oversized_error_http_response(status_code)
+    } else {
+        remap_error_http_response(status_code, header_end, &buffered).unwrap_or(buffered)
+    };
     tcp_stream.write_all(&outgoing).await?;
     let _ = tcp_stream.shutdown().await;
     Ok(RouteAttemptResult::Delivered { status_code })

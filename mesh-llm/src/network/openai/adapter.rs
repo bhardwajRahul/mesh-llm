@@ -2,19 +2,7 @@ use crate::network::openai::schema;
 use anyhow::{Context, Result};
 
 pub(crate) fn parse_chat_stream_chunk(payload: &str) -> Result<schema::ChatCompletionStreamChunk> {
-    let chunk: schema::ChatCompletionStreamChunk =
-        serde_json::from_str(payload).context("parse typed upstream chat stream chunk")?;
-    let _ = chunk.extra.len();
-    if let Some(usage) = chunk.usage.as_ref() {
-        let _ = usage.extra.len();
-    }
-    if let Some(choice) = chunk.choices.first() {
-        let _ = (choice.finish_reason.as_deref(), choice.extra.len());
-        if let Some(delta) = choice.delta.as_ref() {
-            let _ = (delta.role.as_deref(), delta.extra.len());
-        }
-    }
-    Ok(chunk)
+    serde_json::from_str(payload).context("parse typed upstream chat stream chunk")
 }
 
 #[cfg(test)]

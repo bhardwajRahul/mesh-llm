@@ -233,12 +233,11 @@ mod tests {
 
     #[test]
     fn stream_usage_to_responses_usage_maps_missing_fields_to_null() {
-        let usage = schema::StreamUsage {
-            prompt_tokens: Some(11),
-            completion_tokens: None,
-            total_tokens: Some(14),
-            extra: serde_json::Map::new(),
-        };
+        let usage: schema::StreamUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 11,
+            "total_tokens": 14
+        }))
+        .unwrap();
         let mapped = stream_usage_to_responses_usage(&usage);
 
         assert_eq!(mapped["input_tokens"], 11);

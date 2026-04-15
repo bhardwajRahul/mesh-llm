@@ -10,30 +10,30 @@ pub(crate) struct ChatCompletionStreamChunk {
     #[serde(default)]
     pub usage: Option<StreamUsage>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    _extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ChatCompletionStreamChoice {
     #[serde(default)]
     pub delta: Option<ChatCompletionDelta>,
-    #[serde(default)]
-    pub finish_reason: Option<String>,
+    #[serde(rename = "finish_reason", default)]
+    _finish_reason: Option<String>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    _extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ChatCompletionDelta {
     #[serde(default)]
     pub content: Option<String>,
-    #[serde(default)]
-    pub role: Option<String>,
+    #[serde(rename = "role", default)]
+    _role: Option<String>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    _extra: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct StreamUsage {
     #[serde(default)]
     pub prompt_tokens: Option<u64>,
@@ -42,5 +42,5 @@ pub(crate) struct StreamUsage {
     #[serde(default)]
     pub total_tokens: Option<u64>,
     #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    _extra: Map<String, Value>,
 }
