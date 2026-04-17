@@ -82,7 +82,7 @@ rm -rf /tmp/test-bundle
 gh workflow run release.yml -f version=v0.X.0 -f prerelease=false -f target_branch=main
 ```
 
-The Release workflow is now the source of truth for stable releases. It checks out `main`, runs the release consistency checks, bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, creates the release commit directly on `main`, creates and pushes the release tag, builds the release artifacts, publishes the GitHub release, and then publishes `mesh-llm-client` and `mesh-api` to crates.io.
+The Release workflow is now the source of truth for stable releases. It checks out `main`, runs the release consistency checks, bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, creates the release commit directly on `main`, creates and pushes the release tag, builds the release artifacts, and publishes the GitHub release.
 
 On native Windows, `just check-release` still runs the Rust/docs/workflow invariant checks, but it skips the Bash-only `install.sh` and `scripts/package-release.sh` parity checks. Run the release-target parity check on macOS or Linux before cutting a tag if you need full shell-script coverage.
 
@@ -92,7 +92,7 @@ On native Windows, `just check-release` still runs the Rust/docs/workflow invari
 gh workflow run release.yml -f version=v0.X.0-rc.1 -f prerelease=true -f target_branch=feature/your-branch
 ```
 
-The same Release workflow handles prereleases. Set `prerelease=true` and provide the branch you want to cut the prerelease from. The workflow creates the prerelease commit directly on that branch, pushes the branch update, creates and pushes the prerelease tag, builds the artifacts, and publishes a GitHub prerelease. It skips crates.io publishing for prerelease tags.
+The same Release workflow handles prereleases. Set `prerelease=true` and provide the branch you want to cut the prerelease from. The workflow creates the prerelease commit directly on that branch, pushes the branch update, creates and pushes the prerelease tag, builds the artifacts, and publishes a GitHub prerelease.
 
 ### 6. Let GitHub Actions build and publish the release
 
