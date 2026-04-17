@@ -11,6 +11,8 @@ public extension MeshClient {
 }
 
 #if canImport(mesh_ffiFFI)
+import mesh_ffiFFI
+
 public final class EventStreamBridge: EventListener, @unchecked Sendable {
     private let continuation: AsyncThrowingStream<MeshEvent, Error>.Continuation
     private let onCancel: @Sendable (String) -> Void
