@@ -350,7 +350,14 @@ jobs:
         run: cargo build -p mesh-llm --bin mesh-llm
 
       - name: Clone llama.cpp fork
-        run: git clone -b upstream-latest --depth 1 https://github.com/michaelneale/llama.cpp.git llama.cpp
+        run: |
+          git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git llama.cpp
+          if [[ -f LLAMA_CPP_SHA ]]; then
+            SHA=$(tr -d '[:space:]' < LLAMA_CPP_SHA)
+            cd llama.cpp
+            git fetch --depth 1 origin "$SHA"
+            git checkout "$SHA"
+          fi
 
       - name: Build llama.cpp (CPU + RPC)
         run: |
