@@ -23,6 +23,9 @@ fn minimal_config() -> NodeConfigSnapshot {
             model: "Qwen3-8B".to_string(),
             mmproj: None,
             ctx_size: None,
+            gpu_id: None,
+            model_ref: None,
+            mmproj_ref: None,
         }],
         plugins: vec![],
     }
@@ -63,6 +66,9 @@ fn canonical_config_hash_differs_for_different_configs() {
         model: "GLM-4.7-Flash".to_string(),
         mmproj: None,
         ctx_size: None,
+        gpu_id: None,
+        model_ref: None,
+        mmproj_ref: None,
     });
     assert_ne!(
         canonical_config_hash(&config_a),

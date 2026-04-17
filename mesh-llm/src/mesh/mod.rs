@@ -3278,6 +3278,7 @@ impl Node {
                 let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                     gen: NODE_PROTOCOL_GENERATION,
                     node_id: vec![],
+                    owner_id: String::new(),
                     revision: 0,
                     config_hash: vec![],
                     config: None,
@@ -3297,6 +3298,7 @@ impl Node {
             let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                 gen: NODE_PROTOCOL_GENERATION,
                 node_id: vec![],
+                owner_id: String::new(),
                 revision: 0,
                 config_hash: vec![],
                 config: None,
@@ -3313,6 +3315,7 @@ impl Node {
                 let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                     gen: NODE_PROTOCOL_GENERATION,
                     node_id: vec![],
+                    owner_id: String::new(),
                     revision: 0,
                     config_hash: vec![],
                     config: None,
@@ -3334,6 +3337,7 @@ impl Node {
             let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                 gen: NODE_PROTOCOL_GENERATION,
                 node_id: vec![],
+                owner_id: String::new(),
                 revision: 0,
                 config_hash: vec![],
                 config: None,
@@ -3360,6 +3364,7 @@ impl Node {
                 let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                     gen: NODE_PROTOCOL_GENERATION,
                     node_id: vec![],
+                    owner_id: String::new(),
                     revision: 0,
                     config_hash: vec![],
                     config: None,
@@ -3373,6 +3378,7 @@ impl Node {
             ConfigSnapshotResponse {
                 gen: NODE_PROTOCOL_GENERATION,
                 node_id: self.endpoint.id().as_bytes().to_vec(),
+                owner_id: local_owner_id.clone(),
                 revision: state.revision(),
                 config_hash: state.config_hash().to_vec(),
                 config: Some(proto_cfg),
@@ -3405,6 +3411,7 @@ impl Node {
                         ConfigUpdateNotification {
                             gen: NODE_PROTOCOL_GENERATION,
                             node_id: self.endpoint.id().as_bytes().to_vec(),
+                            owner_id: local_owner_id.clone(),
                             revision: state.revision(),
                             config_hash: state.config_hash().to_vec(),
                             config: Some(proto_cfg),
@@ -3685,6 +3692,10 @@ impl Node {
         let req = ConfigSubscribe {
             gen: NODE_PROTOCOL_GENERATION,
             subscriber_id: self.endpoint.id().as_bytes().to_vec(),
+            // Owner-id filtering is an embedded-client concept; mesh-llm does
+            // not currently filter snapshots, so we leave this empty for
+            // backward compatibility with older peers.
+            owner_id: String::new(),
         };
         write_len_prefixed(&mut send, &req.encode_to_vec()).await?;
 
@@ -3701,6 +3712,7 @@ impl Node {
         let empty_notif = ConfigUpdateNotification {
             gen: NODE_PROTOCOL_GENERATION,
             node_id: snapshot.node_id.clone(),
+            owner_id: snapshot.owner_id.clone(),
             revision: snapshot.revision,
             config_hash: snapshot.config_hash.clone(),
             config: snapshot.config.clone(),

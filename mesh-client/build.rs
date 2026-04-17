@@ -1,8 +1,14 @@
 use std::fs;
 use std::path::Path;
 
+// The canonical schema lives in the mesh-llm crate so the workspace has a
+// single source of truth for the wire protocol. mesh-client compiles it
+// from there rather than carrying its own copy.
+const PROTO_REL_PATH: &str = "../mesh-llm/proto/node.proto";
+const PROTO_INCLUDE_DIR: &str = "../mesh-llm/proto";
+
 fn main() {
-    watch_path(Path::new("proto"));
+    watch_path(Path::new(PROTO_INCLUDE_DIR));
     compile_node_proto();
 }
 
@@ -26,6 +32,6 @@ fn compile_node_proto() {
     std::env::set_var("PROTOC", protoc);
 
     prost_build::Config::new()
-        .compile_protos(&["proto/node.proto"], &["proto"])
+        .compile_protos(&[PROTO_REL_PATH], &[PROTO_INCLUDE_DIR])
         .expect("compile node proto");
 }
