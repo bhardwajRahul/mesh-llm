@@ -35,6 +35,18 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+fn current_time_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn record_first_joined_mesh_ts(node: &mesh::Node) {
+    let now_ms = current_time_unix_ms();
+    node.set_first_joined_mesh_ts_if_absent(now_ms).await;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StartupModelSpec {
     model_ref: PathBuf,
@@ -1292,6 +1304,9 @@ async fn join_mesh_for_mcp(cli: &Cli, node: &mesh::Node) -> Result<()> {
         for token in &cli.join {
             match node.join(token).await {
                 Ok(()) => {
+                    if node.mesh_id().await.is_some() {
+                        record_first_joined_mesh_ts(node).await;
+                    }
                     eprintln!("Joined mesh");
                     return Ok(());
                 }
@@ -1327,6 +1342,9 @@ async fn join_mesh_for_mcp(cli: &Cli, node: &mesh::Node) -> Result<()> {
                     );
                     match node.join(token).await {
                         Ok(()) => {
+                            if node.mesh_id().await.is_some() {
+                                record_first_joined_mesh_ts(node).await;
+                            }
                             last_err = None;
                             break;
                         }
@@ -1555,6 +1573,9 @@ async fn run_auto(
         for (t, mesh_name) in &join_attempts {
             match node.join(t).await {
                 Ok(()) => {
+                    if node.mesh_id().await.is_some() {
+                        record_first_joined_mesh_ts(&node).await;
+                    }
                     eprintln!("Joined mesh");
                     joined = true;
                     successful_join = Some((t.clone(), mesh_name.clone()));
@@ -1587,6 +1608,7 @@ async fn run_auto(
                 // Wait for gossip to propagate mesh_id
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 if let Some(id) = save_node.mesh_id().await {
+                    record_first_joined_mesh_ts(&save_node).await;
                     mesh::save_last_mesh_id(&id);
                     tracing::info!("Mesh ID: {id}");
                 }
@@ -1640,6 +1662,7 @@ async fn run_auto(
         };
         let mesh_id = mesh::generate_mesh_id(cli.mesh_name.as_deref(), nostr_pubkey.as_deref());
         node.set_mesh_id_force(mesh_id.clone()).await;
+        record_first_joined_mesh_ts(&node).await;
         mesh::save_last_mesh_id(&mesh_id);
         tracing::info!("Mesh ID: {mesh_id}");
         eprintln!("Invite: {token}");
