@@ -565,7 +565,21 @@ pub(crate) async fn run() -> Result<()> {
         return Ok(());
     }
     let mut startup_models = resolve_startup_models(&startup_specs, cli.max_vram).await?;
-    preflight_config_owned_startup_models(&config, &startup_specs, &mut startup_models)?;
+    let bin_dir = match &cli.bin_dir {
+        Some(d) => d.clone(),
+        None => detect_bin_dir()?,
+    };
+    let rpc_binary_flavor = if config.gpu.assignment == plugin::GpuAssignment::Pinned {
+        launch::resolve_binary_flavor(&bin_dir, "rpc-server", cli.llama_flavor)?
+    } else {
+        None
+    };
+    preflight_config_owned_startup_models(
+        &config,
+        &startup_specs,
+        &mut startup_models,
+        rpc_binary_flavor,
+    )?;
     let resolved_models: Vec<PathBuf> = startup_models
         .iter()
         .map(|model| model.resolved_path.clone())
@@ -594,11 +608,6 @@ pub(crate) async fn run() -> Result<()> {
                 .map(router::strip_split_suffix_owned)
         })
         .collect();
-
-    let bin_dir = match &cli.bin_dir {
-        Some(d) => d.clone(),
-        None => detect_bin_dir()?,
-    };
 
     run_auto(
         cli,
@@ -830,13 +839,28 @@ fn preflight_config_owned_startup_models(
     config: &plugin::MeshConfig,
     specs: &[StartupModelSpec],
     plans: &mut [StartupModelPlan],
+    binary_flavor: Option<launch::BinaryFlavor>,
 ) -> Result<()> {
     if config.gpu.assignment != plugin::GpuAssignment::Pinned {
         return Ok(());
     }
 
-    let survey = hardware::query(pinned_startup_preflight_metrics());
+    let mut survey = hardware::query(pinned_startup_preflight_metrics());
+    apply_backend_devices_for_flavor(&mut survey.gpus, binary_flavor);
     preflight_config_owned_startup_models_with_gpus(config, specs, plans, &survey.gpus)
+}
+
+fn apply_backend_devices_for_flavor(
+    gpus: &mut [hardware::GpuFacts],
+    binary_flavor: Option<launch::BinaryFlavor>,
+) {
+    let Some(binary_flavor) = binary_flavor else {
+        return;
+    };
+
+    for gpu in gpus {
+        gpu.backend_device = launch::backend_device_for_flavor(gpu.index, binary_flavor);
+    }
 }
 
 fn pinned_startup_preflight_metrics() -> &'static [hardware::Metric] {
@@ -3239,6 +3263,28 @@ mod tests {
                 vram_bytes: 24_000_000_000,
             })
         );
+    }
+
+    #[test]
+    fn pinned_gpu_startup_preflight_uses_backend_available_from_binary_flavor() {
+        let mut gpus = vec![
+            synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0")),
+            synthetic_gpu(1, Some("pci:0000:b3:00.0"), Some("ROCm1")),
+        ];
+
+        apply_backend_devices_for_flavor(&mut gpus, Some(launch::BinaryFlavor::Vulkan));
+
+        assert_eq!(gpus[0].backend_device.as_deref(), Some("Vulkan0"));
+        assert_eq!(gpus[1].backend_device.as_deref(), Some("Vulkan1"));
+    }
+
+    #[test]
+    fn pinned_gpu_startup_preflight_keeps_detected_backend_without_resolved_flavor() {
+        let mut gpus = vec![synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0"))];
+
+        apply_backend_devices_for_flavor(&mut gpus, None);
+
+        assert_eq!(gpus[0].backend_device.as_deref(), Some("CUDA0"));
     }
 
     #[test]

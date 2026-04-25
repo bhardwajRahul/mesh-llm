@@ -211,6 +211,27 @@ fn resolve_binary_path(
     }
 }
 
+pub(crate) fn resolve_binary_flavor(
+    bin_dir: &Path,
+    name: &str,
+    requested_flavor: Option<BinaryFlavor>,
+) -> Result<Option<BinaryFlavor>> {
+    resolve_binary_path(bin_dir, name, requested_flavor).map(|binary| binary.flavor)
+}
+
+pub(crate) fn backend_device_for_flavor(
+    index: usize,
+    binary_flavor: BinaryFlavor,
+) -> Option<String> {
+    match binary_flavor {
+        BinaryFlavor::Cpu => None,
+        BinaryFlavor::Cuda => Some(format!("CUDA{index}")),
+        BinaryFlavor::Rocm => Some(format!("ROCm{index}")),
+        BinaryFlavor::Vulkan => Some(format!("Vulkan{index}")),
+        BinaryFlavor::Metal => Some(format!("MTL{index}")),
+    }
+}
+
 fn child_library_search_paths(binary_path: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(parent) = binary_path.parent() {
@@ -1950,6 +1971,19 @@ No devices found
             preferred_device(&available, Some(BinaryFlavor::Vulkan)),
             Some("Vulkan0".to_string())
         );
+    }
+
+    #[test]
+    fn backend_device_for_flavor_uses_backend_namespace() {
+        assert_eq!(
+            super::backend_device_for_flavor(0, BinaryFlavor::Vulkan),
+            Some("Vulkan0".to_string())
+        );
+        assert_eq!(
+            super::backend_device_for_flavor(1, BinaryFlavor::Cuda),
+            Some("CUDA1".to_string())
+        );
+        assert_eq!(super::backend_device_for_flavor(0, BinaryFlavor::Cpu), None);
     }
 
     #[test]
